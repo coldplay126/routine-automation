@@ -1,0 +1,65 @@
+routine-automation 공개 베타 설치 방법
+
+팀 시범 사용용 베타입니다. 회사의 소스 공개·업무 데이터·LLM 사용 정책을 먼저 확인하세요.
+공개 저장소: https://github.com/coldplay126/routine-automation
+배포: https://github.com/coldplay126/routine-automation/releases
+라이선스: MIT (LICENSE 참조)
+
+1. 공식 Release 또는 신뢰하는 배포자가 보낸 최신 routine-automation-<VERSION>.zip인지 확인하세요.
+2. zip을 더블클릭해 압축을 풉니다.
+3. 폴더 안의 'routine 설치.command'를 더블클릭합니다.
+4. 열린 터미널의 설치 안내를 따릅니다. 끝나면 결과가 표시되고 아무 키로 닫습니다.
+아래 <VERSION>은 받은 zip의 실제 버전으로 바꾸세요.
+
+macOS에서 차단하는 경우
+
+인터넷/Slack에서 받은 zip과 압축을 푼 파일에는 격리(quarantine) 속성이 붙을 수 있습니다.
+이 패키지는 서명·공증되지 않았으므로 macOS 15 이상에서 더블클릭이 차단될 수 있습니다.
+우클릭 › 열기로 해결된다고 가정하지 마세요. 신뢰하는 배포본에 한해 아래 대안을 사용하세요.
+
+대안 ① 시스템 설정
+더블클릭을 시도한 직후 시스템 설정 › 개인정보 보호 및 보안으로 이동합니다.
+보안 영역의 '그래도 열기'를 누르고, 다시 뜬 경고에서 '열기'를 확인합니다.
+회사에서 관리하는 Mac에서는 이 버튼이 없거나 정책상 허용되지 않을 수 있습니다.
+악성 소프트웨어·손상 경고라면 강행하지 말고 배포자에게 확인하세요.
+
+대안 ② 터미널 한 줄
+Downloads에 압축을 푼 기본 폴더가 있다면 터미널에 아래 한 줄을 입력하세요.
+
+/bin/bash "$HOME/Downloads/routine-automation-<VERSION>/install.sh"
+
+폴더 이름이나 위치가 다르면 경로를 바꾸세요. 기존 ./install.sh도 동작합니다.
+이 명령은 Finder의 더블클릭 경로 대신 명시적으로 셸에서 설치 스크립트를 읽습니다.
+전역 Gatekeeper 끄기나 다운로드 폴더 전체의 격리 속성 제거는 하지 마세요.
+설치가 시작된 뒤 설치 복사본에 한해서 기존 설치 절차가 격리 속성을 정리합니다.
+
+그다음 업데이트
+공식 공개 Release에서 최신 베타까지 찾아 줍니다. 인증 없는 curl을 쓰므로 업데이트에는 gh가 필요하지 않습니다.
+실행: routine update
+비교만: routine update --check
+질문 없이 업데이트: routine update --yes
+오프라인 Downloads 탐색: routine update --from downloads
+공개 Release만 사용: routine update --from github
+다른 위치의 zip: routine update "/경로/routine-automation-<VERSION>.zip"
+네트워크 실패·요청 제한·빈 목록이면 이유를 표시하고 Downloads의 검증된 zip으로 대체합니다.
+asset 누락·허용 외 URL·잘못된 크기·태그와 VERSION 불일치는 설치하지 않습니다.
+공개 빌드(루트 LICENSE 포함)만 설치하며, LICENSE 없는 개발판 zip은 경로와 이유를 안내하고 제외합니다.
+새 zip 설치 전 현재 버전 → 새 버전과 변경 내역이 표시됩니다.
+같거나 낮은 버전은 설치하지 않습니다. 롤백 절차는 README.md에 있습니다.
+사용자가 받은 zip은 그대로 남고, GitHub에서 받은 임시 zip은 종료 시 정리합니다.
+압축을 푼 폴더는 자동 업데이트 후보가 아닙니다.
+설정은 기존 설치 기록의 경로를 유지합니다. 명시한 ROUTINE_CONFIG가 다르면 중단합니다.
+아침 루틴/붙여넣기 실행 중에는 끝난 뒤 다시 업데이트하세요.
+미완료 설치가 남으면 routine update --yes로 복구하세요. --check는 복구하지 않습니다.
+새 필수 설정 안내가 나오면 새 zip을 직접 풀어 그 안의 설치 런처/설정 도구를 실행하세요.
+status와 아침 알림의 새 버전 확인은 하루 한 번 캐시하며 자동 설치하지 않습니다.
+
+업데이트 명령이 없거나 더 높은 번호의 비공개 개발 설치본에서 공개 베타로 전환하는 경우:
+새 zip을 풀고 터미널에서 다음을 한 번 실행하세요. 경로는 실제 푼 위치로 바꾸세요.
+/bin/bash "$HOME/Downloads/routine-automation-<VERSION>/install.sh" --update
+기존 설정·데이터·설치 신원을 보존하며 첫 실행은 하지 않습니다.
+
+Apple 공식 안내: https://support.apple.com/102445
+미검증 범위: 실제 공개 Release 다운로드, Finder/Archive Utility의 격리 전파와
+더블클릭 차단·예외 버튼, 실제 launchd/TCC 권한과 조직별 Slack 화면은
+격리 테스트만으로 보장하지 않습니다. 자세한 한계는 README.md와 CHANGELOG.md를 확인하세요.

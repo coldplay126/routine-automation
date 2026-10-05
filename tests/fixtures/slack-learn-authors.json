@@ -1,0 +1,15 @@
+[
+  {"case":"전송희","header":"\t\t\t120 버튼 전송희"},
+  {"case":"리포트 전송봇","header":"\t\t\t120 버튼 리포트 전송봇"},
+  {"case":"메뉴판_관리자","header":"\t\t\t120 버튼 메뉴판_관리자"},
+  {"case":"반응형UI팀","header":"\t\t\t120 버튼 반응형UI팀"},
+  {"case":"깊은 작성자","header":"\t\t\t\t120 버튼 테스트_사용자_동료"},
+  {"case":"link 작성자","header":"\t\t\t120 link [테스트_사용자_동료](https://example.slack.com/team/UOTHER)"},
+  {"case":"정적 텍스트 작성자","header":"\t\t\t120 정적 텍스트 테스트_사용자_동료"},
+  {"case":"본문 역할의 정적 작성자","header":"\t\t\t120 container, Text: 테스트_사용자_동료"},
+  {"case":"작성자 없는 새 컨테이너","header":""},
+  {"case":"같은 컨테이너의 미인식 버튼","header":"\t\t\t120 버튼 전송","remove_parent":true},
+  {"case":"같은 컨테이너의 link 작성자","header":"\t\t\t120 link [테스트_사용자_동료](https://example.slack.com/team/UOTHER)","remove_parent":true},
+  {"case":"같은 컨테이너의 정적 작성자","header":"\t\t\t120 정적 텍스트 테스트_사용자_동료","remove_parent":true},
+  {"case":"같은 컨테이너의 깊은 작성자","header":"\t\t\t\t120 버튼 테스트_사용자_동료","remove_parent":true}
+]

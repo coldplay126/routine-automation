@@ -1,0 +1,559 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+if ! command -v brew >/dev/null; then
+  for brew_path in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+    if [[ -x $brew_path ]]; then export PATH="${PATH:-/usr/bin:/bin}:${brew_path%/*}"; break; fi
+  done
+fi
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+share_dir="$script_dir/../share"
+repo=$(cd -- "$script_dir/.." && pwd)
+# shellcheck source=../share/config.sh
+source "$share_dir/config.sh"
+# shellcheck source=../share/install.sh
+source "$share_dir/install.sh"
+# shellcheck source=../share/inspect.sh
+source "$share_dir/inspect.sh"
+# shellcheck source=../share/orca.sh
+source "$share_dir/orca.sh"
+# shellcheck source=../share/ui.sh
+source "$share_dir/ui.sh"
+# shellcheck source=../share/style.sh
+source "$share_dir/style.sh"
+yes=0 non_interactive=0 skip=' ' init_args=() overwrite=0 setup_engine='' setup_delivery=''
+steps=(platform dependencies github llm slack orca disk-access config launchd first-run)
+labels=('플랫폼 확인' '필수 도구' 'GitHub 로그인' 'LLM 엔진' 'Slack 앱' 'Orca 권한' '전체 디스크 접근' '설정 저장' '예약 실행 등록' '첫 실행')
+while (($#)); do
+  case $1 in
+    --yes) yes=1; shift ;;
+    --non-interactive) non_interactive=1; shift ;;
+    --overwrite-config) overwrite=1; shift ;;
+    --skip) (($#>=2)) || exit 2; [[ " ${steps[*]} " == *" $2 "* ]] || { echo "알 수 없는 단계: $2"; exit 2; }; skip+="$2 "; shift 2 ;;
+    --set) (($#>=3)) || exit 2; init_args+=("$1" "$2" "$3"); shift 3 ;;
+    -h|--help) echo 'routine setup [--yes] [--non-interactive] [--skip STEP] [init 플래그...]'; printf '단계: %s\n' "${steps[*]}"; exit 0 ;;
+    --*) (($#>=2)) || exit 2; init_args+=("$1" "$2"); shift 2 ;;
+    *) echo "알 수 없는 옵션: $1"; exit 2 ;;
+  esac
+done
+# Explicit init choices guide prerequisites; transient environment values never
+# become permanent LaunchAgent/app settings.
+for ((arg_index=0; arg_index<${#init_args[@]}; arg_index++)); do
+  case ${init_args[arg_index]} in
+    --delivery-mode) setup_delivery=${init_args[arg_index+1]} ;;
+    --engine|--draft-llm-engine) setup_engine=${init_args[arg_index+1]} ;;
+    --set)
+      case ${init_args[arg_index+1]} in
+        delivery.mode) setup_delivery=${init_args[arg_index+2]} ;;
+        draft.llm.engine) setup_engine=${init_args[arg_index+2]} ;;
+      esac ;;
+  esac
+done
+if routine_jq_supported; then routine_load_config file; fi
+tty_ui=0 output_visible=0 interactive_output=0 drawn_lines=0
+if [[ -t 1 ]]; then tty_ui=1; fi
+log_dir="$HOME/Library/Logs/routine-automation"
+mkdir -p "$log_dir"; chmod 700 "$log_dir"
+log="$log_dir/setup-$(date '+%Y%m%d-%H%M%S')-$$.log"
+state="$log_dir/setup-state.json"
+[[ -f $state ]] || printf '{}\n' > "$state"
+begin_interactive_output() {
+  local line
+  interactive_output=1
+  stop_spinner
+  if ((tty_ui && drawn_lines>0)); then
+    printf '\033[%sA' "$drawn_lines" > /dev/tty
+    for ((line=0; line<drawn_lines; line++)); do printf '\r\033[2K\n' > /dev/tty; done
+    printf '\033[%sA' "$drawn_lines" > /dev/tty
+  fi
+  drawn_lines=0
+}
+setup_message() {
+  printf '%s\n' "$1"
+  if ((tty_ui && !output_visible)); then begin_interactive_output; printf '%s\n' "$1" > /dev/tty; fi
+}
+confirm() {
+  if ((yes)) && [[ ${2:-} != explicit ]]; then return 0; fi
+  if ((non_interactive)) || [[ ! -t 0 ]]; then echo '사용자 확인 필요: --yes 또는 대화형 실행'; return 1; fi
+  begin_interactive_output
+  ui_confirm "$1"
+}
+wait_login() {
+  local kind=$1 answer
+  if [[ $kind == github ]]; then gh auth status >/dev/null 2>&1 && return 0
+  else claude auth status 2>/dev/null | jq -e '.loggedIn==true' >/dev/null && return 0; fi
+  if ((non_interactive)) || [[ ! -t 0 ]]; then echo "$kind 로그인 필요 — 대화형 setup을 다시 실행하세요."; return 1; fi
+  begin_interactive_output
+  if [[ $kind == github ]]; then gh auth login > /dev/tty 2>&1 || return 1
+  else printf '다른 터미널에서 claude 실행 후 /login을 완료하세요. s: 이 단계 건너뛰기\n' > /dev/tty; fi
+  while true; do
+    if [[ $kind == github ]]; then gh auth status >/dev/null 2>&1 && return 0
+    else claude auth status 2>/dev/null | jq -e '.loggedIn==true' >/dev/null && return 0; fi
+    if IFS= read -r -t 2 -n 1 answer < /dev/tty && [[ $answer == [sS] ]]; then return 10; fi
+  done
+}
+setup_step() {
+  local step=$1 cmd missing=() engine rc elapsed start service day out signature state_temp request marker result brew_bin
+  case $step in
+    platform)
+      [[ $(uname -s) == Darwin ]] || { echo 'macOS에서만 설치할 수 있습니다.'; return 1; }
+      command -v brew >/dev/null || { setup_message 'Homebrew가 없습니다. https://brew.sh 에서 설치한 뒤 다시 실행하세요.'; return 1; } ;;
+    dependencies)
+      for cmd in jq gtimeout gh; do
+        if [[ $cmd == jq ]]; then routine_jq_supported || missing+=('jq (>=1.7)')
+        else type -P "$cmd" >/dev/null || missing+=("$cmd"); fi
+      done
+      if ((${#missing[@]})); then
+        echo "설치 필요: ${missing[*]}"
+        confirm 'Homebrew jq coreutils gh를 설치할까요?' || return 1
+        start_spinner
+        brew install jq coreutils gh || return 1
+        brew_bin=$(type -P brew); PATH="$(dirname -- "$brew_bin"):$PATH"; export PATH
+      else echo '이미 충족 — 건너뜀'; fi
+      routine_jq_supported || { echo 'jq 1.7 이상 필요 — Homebrew jq를 PATH에서 먼저 선택하세요.'; return 1; }
+      routine_load_config file
+      if ui_interactive && ! type -P gum >/dev/null; then
+        begin_interactive_output
+        if ui_confirm '선택 의존성 gum을 설치할까요? (거절해도 텍스트 방식으로 진행)' false; then
+          start_spinner
+          if brew install gum; then echo 'gum 설치 완료'
+          else setup_message 'gum 설치 실패 — 텍스트 방식으로 계속 진행합니다.'; fi
+          stop_spinner
+        else setup_message 'gum 설치 건너뜀 — 텍스트 방식으로 계속 진행합니다.'; fi
+      fi ;;
+    github) wait_login github ;;
+    llm)
+      engine=${setup_engine:-$(routine_get draft.llm.engine)}
+      if [[ $engine == none ]]; then echo 'LLM none — 건너뜀'; return 10; fi
+      if [[ $engine == omp ]]; then type -P omp >/dev/null || { echo 'omp 설치 필요'; return 1; }; echo 'omp 사용'; return 0; fi
+      if ! type -P claude >/dev/null; then
+        if type -P omp >/dev/null; then
+          setup_engine=omp; init_args+=(--draft-llm-engine omp)
+          echo 'omp 선택 (설정에 저장)'; return 0
+        fi
+        setup_message 'Claude Code 공식 설치: curl -fsSL https://claude.ai/install.sh | bash'
+        confirm 'Claude Code를 설치할까요?' || return 1
+        start_spinner
+        curl -fsSL https://claude.ai/install.sh | bash || return 1
+        export PATH="$HOME/.local/bin:$PATH"
+        stop_spinner
+      fi
+      wait_login claude ;;
+    slack) [[ -d ${ROUTINE_APPLICATIONS_DIR:-/Applications}/Slack.app ]] || { echo 'Slack 데스크톱 앱을 설치하세요.'; return 1; } ;;
+    orca)
+      if [[ -z $setup_delivery && ( ! -f $(routine_config_path) || $overwrite == 1 ) &&
+            -t 0 && $non_interactive == 0 && -d ${ROUTINE_APPLICATIONS_DIR:-/Applications}/Orca.app ]]; then
+        begin_interactive_output
+        setup_delivery=clipboard
+        if ui_confirm 'Slack 입력창에 자동 붙여넣기까지 할까요? (Orca 필요, 전송은 하지 않음)' false; then setup_delivery=gui-paste; fi
+        init_args+=(--delivery-mode "$setup_delivery")
+      fi
+      [[ ${setup_delivery:-$(routine_get delivery.mode)} == gui-paste ]] || { echo 'clipboard — Orca 건너뜀'; return 10; }
+      [[ -d ${ROUTINE_APPLICATIONS_DIR:-/Applications}/Orca.app ]] || { setup_message 'Orca 앱을 설치하세요. brew orca cask는 다른 제품이므로 사용하지 마세요.'; return 1; }
+      orca=$(find_orca) || { setup_message '실행 가능한 Orca CLI가 없습니다. Orca 앱 설치를 확인하세요.'; return 1; }
+      ensure_orca_runtime "$orca" || { setup_message 'Orca 실행 상태를 확인하지 못했습니다.'; return 1; }
+      slack_rc=0; orca_slack_state "$orca" >/dev/null || slack_rc=$?
+      if ((slack_rc==0)); then echo 'Slack 화면·스크린샷 읽기 성공 — Orca 권한 확인'; return 0; fi
+      if ((non_interactive)) || [[ ! -t 0 ]]; then
+        if ((slack_rc==3)); then setup_message 'Slack 창이 닫혀 있어 화면을 읽지 못했습니다. Slack 창을 연 뒤 다시 실행하세요.'
+        else setup_message 'Orca 권한을 읽지 못했습니다. TTY에서 setup으로 접근성·화면 기록 권한을 허용하세요.'; fi
+        return 1
+      fi
+      begin_interactive_output
+      shown=''
+      while true; do
+        # A running Slack with its window closed is not a permission problem; ask for the window first.
+        if ((slack_rc==3)) && [[ $shown != window ]]; then
+          ui_note 'Slack 창 열기' '  Slack 창이 닫혀 있어 화면을 읽을 수 없습니다 (Slack은 실행 중).
+  Dock에서 Slack 아이콘을 눌러 창을 열어 주세요. 창이 보이면 자동으로 넘어갑니다.
+  s: 클립보드 방식으로 건너뛰기' permission > /dev/tty
+          shown=window
+        elif ((slack_rc!=3)) && [[ $shown != permissions ]]; then
+          ui_note 'Orca 권한 안내' '  Slack 화면을 읽으려면 Orca의 접근성 권한이 필요합니다.
+  붙여넣기 결과를 확인하려면 화면 기록 권한도 필요합니다.
+  시스템 설정 › 개인정보 보호 및 보안의 [손쉬운 사용]과 [화면 및 시스템 오디오 녹음]을 엽니다.
+  두 목록에서 Orca를 켜세요. macOS가 재시작을 요청하면 Orca를 다시 실행하세요.
+  2초마다 실제 Slack 화면 읽기를 다시 확인합니다. s: 클립보드 방식으로 건너뛰기' permission > /dev/tty
+          "$orca" computer permissions --id accessibility >> "$log" 2>&1 || true
+          "$orca" computer permissions --id screenshots >> "$log" 2>&1 || true
+          shown=permissions
+        fi
+        if IFS= read -r -t 2 -n 1 answer < /dev/tty && [[ $answer == [sS] ]]; then
+          setup_delivery=clipboard; init_args+=(--delivery-mode clipboard)
+          echo 'Orca 확인 건너뜀 — 클립보드 방식으로 저장'; return 10
+        fi
+        slack_rc=0; orca_slack_state "$orca" >/dev/null || slack_rc=$?
+        if ((slack_rc==0)); then echo 'Slack 화면·스크린샷 읽기 성공 — Orca 권한 확인'; return 0; fi
+      done ;;
+    disk-access)
+      if [[ ! -d $HOME/Library/Mail ]]; then echo '터미널 보호 경로: 미검증 (Mail 경로 없음)'
+      elif /bin/ls -A "$HOME/Library/Mail" >/dev/null 2>&1; then echo '터미널 보호 경로: 읽기 가능 (launchd /bin/bash 권한의 증거가 아님)'
+      else echo '터미널 보호 경로: 읽기 실패 (launchd /bin/bash 권한과 별개)'; fi
+      if jq -e '.disk_access_confirmation=="explicit"' "$state" >/dev/null; then
+        echo '이전 명시적 사용자 확인 유지 — 실제 first-run morning에서 별도 검증'
+        routine_disk_access_report; return 0
+      fi
+      if ((non_interactive)) || [[ ! -t 0 ]]; then echo '전체 디스크 접근은 TTY에서 직접 확인하거나 --skip disk-access 사용 (--yes로 확인하지 않음)'; return 1; fi
+      open 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles'
+      begin_interactive_output
+      ui_note '전체 디스크 접근 권한' '
+  ── 전체 디스크 접근 권한 ──────────────────────────────
+  아침 자동 실행은 macOS 기본 셸(/bin/bash)로 돌아갑니다.
+  ~/Documents 아래 git 저장소, Chrome 방문 기록(Jira), Notion 기록을
+  읽으려면 /bin/bash에 '\''전체 디스크 접근 권한'\''이 필요합니다.
+
+  방금 열린 [시스템 설정 › 개인정보 보호 및 보안 › 전체 디스크 접근 권한]에서
+    1. 목록 아래 [+] 버튼을 누르고 Mac 암호를 입력합니다
+    2. Cmd+Shift+G 를 누르고 /bin/bash 를 입력한 뒤 [열기]를 누릅니다
+    3. 목록에 추가된 '\''bash'\'' 스위치가 켜져 있는지 확인합니다
+  이미 목록에 bash가 켜져 있으면 그대로 두면 됩니다.
+  지금 하지 않으려면 n — 나중에 '\''routine setup'\''으로 다시 할 수 있습니다.
+  ───────────────────────────────────────────────────────' permission > /dev/tty
+      if ! confirm '전체 디스크 접근 권한에 bash를 추가했나요?' explicit; then
+        echo '전체 디스크 접근 건너뜀 — 첫 실행에서 실제 권한을 다시 확인합니다'; return 10
+      fi
+      echo '사용자 확인 저장 — 터미널 읽기 결과와 무관하게 실제 morning 결과로 검증'
+      state_temp=$(mktemp "$log_dir/.setup-state.XXXXXXXX")
+      jq '.disk_access_confirmation="explicit"' "$state" > "$state_temp"; mv "$state_temp" "$state" ;;
+    config)
+      if [[ -f $(routine_config_path) ]] && ((!overwrite)) && ((${#init_args[@]}==0)); then
+        if ((non_interactive)); then echo '기존 설정 유지 — 건너뜀'; routine_load_config persisted; routine_require_config; return; fi
+        confirm '기존 설정을 덮어쓸까요?' || { echo '기존 설정 유지'; routine_load_config persisted; routine_require_config; return; }
+      fi
+      # --overwrite-config keeps the interactive prompts even when flags or the omp fallback add init args.
+      if ((non_interactive)) || { [[ -f $(routine_config_path) && ${#init_args[@]} -gt 0 ]] && ((!overwrite)); }; then init_args+=(--non-interactive); fi
+      # Ctrl-C inside init (text read or gum exit 130) stops the whole setup, not just this step.
+      ROUTINE_SETUP_INIT=1 "$script_dir/routine-init" ${init_args[@]+"${init_args[@]}"} || {
+        rc=$?; ((rc != 130)) || exit 130
+        return 1
+      }
+      routine_load_config persisted ;;
+    launchd)
+      routine_load_config persisted; routine_require_config || return 1
+      routine_install_files "$repo" || return 1 ;;
+    first-run)
+      routine_load_config persisted; routine_require_config || return 1
+      routine_install_paths
+      service="gui/$(id -u)/$(routine_get launchd.label_prefix).morning"
+      day=$(routine_day); out="$HOME/Library/Application Support/routine-automation/scrum/$day.draft.json"
+      signature=$({ cat "$installed_root/VERSION"; jq -cS . <<< "$ROUTINE_SETTINGS"; printf '%s\n' "$day"; } | shasum -a 256); signature=${signature%% *}
+      result="$HOME/Library/Application Support/routine-automation/.setup-first-run-result.json"
+      if [[ -f $out && -f $result && ! -e $HOME/Library/Application\ Support/routine-automation/.setup-first-run ]] &&
+         jq -e '.full_disk_access.status=="readable" or .full_disk_access.status=="unverified"' "$result" >/dev/null &&
+         jq -e --arg hash "$signature" '.first_run_signature==$hash' "$state" >/dev/null; then
+        echo '첫 실행 이미 검증 — 건너뜀'; routine_disk_access_report; return 0
+      fi
+      marker="$HOME/Library/Application Support/routine-automation/.setup-first-run"
+      request=$(uuidgen)
+      mkdir -p "${marker%/*}"
+      printf '%s\n' "$request" > "$marker"
+      if ((tty_ui)); then
+        first_progress_log="$log_dir/morning-$(date '+%Y-%m-%d').log"
+        : >> "$first_progress_log"
+        first_progress_offset=$(wc -c < "$first_progress_log")
+        first_progress_started=$(date +%s)
+        first_progress_active=1
+        start_spinner
+      fi
+      if ! launchctl kickstart -k "$service"; then rm -f "$marker"; echo '첫 실행 kickstart 실패'; return 1; fi
+      start=$(date +%s)
+      while true; do
+        if [[ -f $result ]] && jq -e --arg request "$request" '.request_id==$request' "$result" >/dev/null; then
+          rc=$(jq -r '.exit_code' "$result")
+          routine_disk_access_report
+          [[ $rc == 0 && -f $out ]] || { echo "첫 실행 morning 실패 (exit $rc). morning 로그·TCC·인증을 확인하세요."; return 1; }
+          break
+        fi
+        elapsed=$(($(date +%s)-start)); ((elapsed<900)) || { rm -f "$marker"; echo '첫 실행 시간 초과. launchd.stderr.log·morning 로그와 TCC/인증을 확인하세요.'; return 1; }
+        if [[ -t 0 ]] && IFS= read -r -t 1 -n 1 rc && [[ $rc == [sS] ]]; then echo '첫 실행 확인 건너뜀 (서비스는 실행 중)'; return 10; fi
+        sleep 2
+      done
+      state_temp=$(mktemp "$log_dir/.setup-state.XXXXXXXX")
+      jq --arg hash "$signature" '.first_run_signature=$hash' "$state" > "$state_temp"; mv "$state_temp" "$state"
+      printf '결과 파일: %s\n다음 예약: %s\n' "$out" "$(routine_next_schedule)" ;;
+  esac
+}
+# Keep relative redraws, with one bounded terminal row per header/step.
+render() {
+  local index marker role width label_width note_width time_width=5 note time title previous_lines=$drawn_lines extra_lines line progress_width
+  if ((tty_ui)); then
+    ui_terminal_size
+    if ((first_progress_active)); then read_first_progress; fi
+    width=$((ui_columns>1 ? ui_columns-1 : 1)); ((width<=48)) || width=48
+    label_width=18
+    ((width>=25)) || label_width=$((width>7 ? width-7 : 0))
+    ((width>=7)) || time_width=0
+    note_width=$((width-2-label_width-time_width)); ((note_width>=0)) || note_width=0
+    if [[ $render_width != "$width" ]]; then
+      render_width=$width
+      printf -v render_divider '%*s' "$width" ''; render_divider=${render_divider// /─}
+      for index in "${!steps[@]}"; do fitted_labels[index]=$(ui_fit_text "${labels[index]}" "$label_width"); done
+    fi
+    if ((drawn_lines>0)); then printf '\033[%sA' "$drawn_lines" > /dev/tty; fi
+    title=$(ui_fit_text 'routine 설정' "$((width<12 ? width : 12))")
+    printf '\r\033[2K%s%s\n\r\033[2K%s\n' "$(ui_color strong "$title")" \
+      "$(ui_color hint "$(ui_fit_text " · ${#steps[@]}단계" "$((width>12 ? width-12 : 0))")")" \
+      "$(ui_color hint "$render_divider")" > /dev/tty
+    for index in "${!steps[@]}"; do
+      marker=${marks[index]:-○}; time=''
+      case $marker in
+        ✓) role=success; time="${durations[index]:-0}s" ;;
+        ✗) role=error; time="${durations[index]:-0}s" ;;
+        ○|–|·) role=hint ;;
+        *) role=accent ;;
+      esac
+      ((time_width>0)) || time=''
+      note=$(ui_fit_text "${reasons[index]:-}" "$note_width")
+      printf -v time '%*s' "$time_width" "$time"
+      if ((first_progress_active && index==current_index)); then
+        progress_width=$((ui_columns-3-label_width)); ((progress_width>=0)) || progress_width=0
+        note=$(ui_fit_text "$first_progress_note" "$progress_width")
+        time=''
+      fi
+      if ((width<2)); then printf '\r\033[2K%s\n' "$(ui_color "$role" "$marker")" > /dev/tty
+      else
+        printf '\r\033[2K%s %s%s%s\n' "$(ui_color "$role" "$marker")" "${fitted_labels[index]}" \
+          "$(ui_color hint "$note")" "$(ui_color hint "$time")" > /dev/tty
+      fi
+    done
+    drawn_lines=$((${#steps[@]}+2))
+    if ((first_progress_active)); then
+      printf '\r\033[2K%s\n' "$(ui_color hint "$(ui_fit_text '보통 1~3분 · s 키: 기다리지 않고 넘어가기 (실행은 계속)' "$((ui_columns>1 ? ui_columns-1 : 1))")")" > /dev/tty
+      drawn_lines=$((drawn_lines+1))
+    fi
+    ((drawn_lines<ui_rows)) || drawn_lines=$((ui_rows>1 ? ui_rows-1 : 0))
+    extra_lines=$((previous_lines-drawn_lines))
+    if ((extra_lines>0)); then
+      for ((line=0; line<extra_lines; line++)); do printf '\r\033[2K\n' > /dev/tty; done
+      printf '\033[%sA' "$extra_lines" > /dev/tty
+    fi
+  fi
+}
+marks=() durations=() reasons=() fitted_labels=() render_width=-1 render_divider='' spinner_pid='' spinner_done='' spinner_tty='' current_index=0
+first_progress_active=0 first_progress_note='' first_progress_log='' first_progress_offset=0 first_progress_started=0
+first_step_label() {
+  case $1 in
+    scrum-collect) printf '수집' ;;
+    scrum-draft) printf '초안 작성 (LLM)' ;;
+    scrum-paste) printf '붙여넣기 확인' ;;
+    *-update) printf '도구 업데이트' ;;
+    aws-session) printf 'AWS 세션' ;;
+    *) return 1 ;;
+  esac
+}
+first_source_label() {
+  case $1 in
+    git) printf 'git' ;; prs) printf 'PR' ;; sessions) printf 'omp 세션' ;;
+    claude_sessions) printf 'Claude 세션' ;; jira) printf 'Jira' ;;
+    notion) printf 'Notion' ;; slack) printf 'Slack' ;; *) return 1 ;;
+  esac
+}
+read_first_progress() {
+  local line timestamp event id status seconds rest label epoch source_index now elapsed phase base_phase details combined fitted available
+  while true; do
+    if IFS= read -r line <&3; then line="$progress_partial$line"; progress_partial=''
+    else progress_partial+="$line"; break; fi
+    if [[ $line == COLLECT\ * ]]; then
+      IFS=' ' read -r rest timestamp event id status seconds <<< "$line"
+      label=$(first_source_label "$id") || continue
+      source_index=0
+      while ((source_index<${#progress_sources[@]})) && [[ ${progress_sources[source_index]} != "$label" ]]; do source_index=$((source_index+1)); done
+      case $event in
+        START) progress_sources[source_index]=$label; progress_source_marks[source_index]='…' ;;
+        END) progress_sources[source_index]=$label; if [[ $status == ok ]]; then progress_source_marks[source_index]='✓'; else progress_source_marks[source_index]='✗'; fi ;;
+      esac
+    else
+      IFS=' ' read -r timestamp event id status seconds rest <<< "$line"
+      [[ $timestamp == ????-??-??T??:??:??[+-]???? ]] || continue
+      label=$(first_step_label "$id") || continue
+      case $event in
+        START)
+          epoch=$(date -j -f '%Y-%m-%dT%H:%M:%S%z' "$timestamp" '+%s' 2>/dev/null) || continue
+          progress_step=$id; progress_started=$epoch
+          progress_sources=(); progress_source_marks=() ;;
+        END)
+          [[ $seconds =~ ^[0-9]+s$ ]] || continue
+          [[ -z $progress_completed ]] || progress_completed+=' · '
+          progress_completed+="$label $seconds"
+          progress_step=''; progress_started=$(date +%s)
+          progress_sources=(); progress_source_marks=() ;;
+      esac
+    fi
+  done
+  now=$(date +%s); elapsed=$((now-progress_started)); ((elapsed>=0)) || elapsed=0
+  case $progress_step in
+    scrum-collect) phase='수집 중' ;;
+    scrum-draft) phase='초안 작성 중 (LLM)' ;;
+    scrum-paste) phase='붙여넣기 확인 중' ;;
+    *-update) phase='도구 업데이트 중' ;;
+    aws-session) phase='AWS 세션 확인 중' ;;
+    *) phase='실행 준비 중'; [[ -z $progress_completed ]] || phase='결과 확인 중' ;;
+  esac
+  details=''
+  for source_index in "${!progress_sources[@]}"; do
+    [[ -z $details ]] || details+=' · '
+    details+="${progress_sources[source_index]} ${progress_source_marks[source_index]}"
+  done
+  printf -v base_phase '%s · %d:%02d' "$phase" "$((elapsed/60))" "$((elapsed%60))"
+  [[ -z $details ]] || phase+=" ($details)"
+  printf -v phase '%s · %d:%02d' "$phase" "$((elapsed/60))" "$((elapsed%60))"
+  available=$((ui_columns-21)); ((available>=0)) || available=0
+  fitted=$(ui_fit_text "$phase" "$available")
+  [[ $fitted == "$phase"* ]] || phase=$base_phase
+  first_progress_note=$phase
+  if [[ -n $progress_completed ]]; then
+    combined="$progress_completed · $phase"
+    fitted=$(ui_fit_text "$combined" "$available")
+    [[ $fitted != "$combined"* ]] || first_progress_note=$combined
+  fi
+}
+start_spinner() {
+  ((tty_ui)) || return 0
+  [[ -z $spinner_pid ]] || return 0
+  spinner_done=$(mktemp "$log_dir/.spinner.XXXXXXXX"); rm "$spinner_done"
+  spinner_tty=$(stty -g < /dev/tty)
+  stty -echo -icanon min 0 time 0 < /dev/tty
+  printf '\033[?25l' > /dev/tty
+  (
+    trap - EXIT INT TERM QUIT HUP TSTP
+    frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏'); frame=0
+    if ((first_progress_active)); then
+      exec 3< "$first_progress_log"
+      # A regular-file seek shares its byte offset with this descriptor.
+      dd bs=1 skip="$first_progress_offset" count=0 <&3 > /dev/null 2>/dev/null
+      progress_partial='' progress_step='' progress_started=$first_progress_started progress_completed=''
+      progress_sources=(); progress_source_marks=()
+    fi
+    while [[ ! -e $spinner_done ]]; do
+      marks[current_index]="${frames[frame%10]}"
+      render
+      printf '%s\n' "$drawn_lines" > "$spinner_done.drawn"
+      frame=$((frame+1)); sleep 0.2
+    done
+    if ((first_progress_active)); then exec 3<&-; fi
+  ) &
+  spinner_pid=$!
+}
+stop_spinner() {
+  if [[ -n $spinner_pid ]]; then
+    : > "$spinner_done"
+    wait "$spinner_pid" || true
+    if [[ -s $spinner_done.drawn ]]; then IFS= read -r drawn_lines < "$spinner_done.drawn" || true; fi
+    rm -f "$spinner_done" "$spinner_done.drawn"; spinner_pid=''
+  fi
+  if [[ -n $spinner_tty ]]; then
+    if ! stty "$spinner_tty" < /dev/tty; then printf '터미널 입력 상태 복원 실패\n' >&2; fi
+    printf '\033[?25h' > /dev/tty
+    spinner_tty=''
+  fi
+  first_progress_active=0
+}
+suspend_setup() {
+  [[ -z $spinner_pid ]] || kill -STOP "$spinner_pid" 2>/dev/null || true
+  if [[ -n $spinner_tty ]]; then stty "$spinner_tty" < /dev/tty; fi
+  if ((tty_ui)); then printf '\033[?25h' > /dev/tty; fi
+  kill -STOP "$$"
+  if [[ -n $spinner_tty ]]; then
+    stty -echo -icanon min 0 time 0 < /dev/tty
+    printf '\033[?25l' > /dev/tty
+  fi
+  [[ -z $spinner_pid ]] || kill -CONT "$spinner_pid" 2>/dev/null || true
+}
+finish_setup() {
+  local exit_code=$?
+  trap - EXIT; trap '' INT TERM QUIT HUP TSTP; stop_spinner
+  [[ -z ${output_dir:-} ]] || rm -rf "$output_dir"
+  exit "$exit_code"
+}
+trap finish_setup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 131' QUIT
+trap 'exit 129' HUP
+trap suspend_setup TSTP
+setup_start=$(date +%s)
+if [[ -t 1 ]]; then render; fi
+for index in "${!steps[@]}"; do
+  step=${steps[index]}
+  if [[ $skip == *" $step "* ]]; then
+    marks[index]='–'; reasons[index]='--skip으로 제외'
+    if [[ -t 1 ]]; then render; else printf '– %s: 건너뜀\n' "$step"; fi
+    continue
+  fi
+  marks[index]='●'; render
+  if [[ ! -t 1 ]]; then printf '진행 %s (상세: %s)\n' "$step" "$log"; fi
+  code=0; start=$(date +%s); interactive_output=0 output_visible=0
+  # Animate non-interactive stages so authentication/confirmation prompts remain usable.
+  current_index=$index
+  if [[ -t 1 && ( $step == launchd || $step == platform || $step == slack ) ]]; then start_spinner; fi
+  if [[ -t 0 && $step == config ]]; then
+    begin_interactive_output; output_visible=1
+    output_dir=$(mktemp -d "$log_dir/.config-output.XXXXXXXX")
+    mkfifo -m 600 "$output_dir/fifo"
+    tee -a "$log" < "$output_dir/fifo" & tee_pid=$!
+    setup_step "$step" > "$output_dir/fifo" 2>&1 || code=$?
+    wait "$tee_pid" || code=1
+    rm -rf "$output_dir"; output_dir=''
+  else setup_step "$step" >> "$log" 2>&1 || code=$?; fi
+  stop_spinner
+  if ((tty_ui && interactive_output)); then drawn_lines=0; printf '\n'; fi
+  duration=$(($(date +%s)-start))
+  if ((code==10)); then
+    marks[index]='–'
+    case $step in
+      llm) reasons[index]='LLM 사용 안 함' ;;
+      orca) reasons[index]='clipboard 모드라 불필요' ;;
+      disk-access) reasons[index]='권한 확인 나중에' ;;
+      github|first-run) reasons[index]='사용자가 확인 생략' ;;
+      *) reasons[index]='건너뜀' ;;
+    esac
+  elif ((code!=0)); then
+    marks[index]='✗'; durations[index]=$duration
+    for ((pending=index+1; pending<${#steps[@]}; pending++)); do marks[pending]='·'; reasons[pending]='실행 안 함'; done
+    render
+    if ((tty_ui)); then
+      case $step in
+        platform) cause='macOS와 Homebrew 설치 상태를 확인하세요.' ;;
+        dependencies) cause='필수 도구 설치 상태와 jq 버전을 확인하세요.' ;;
+        github) cause='GitHub CLI 로그인 상태를 확인하세요.' ;;
+        llm) cause='선택한 LLM 엔진의 설치와 로그인 상태를 확인하세요.' ;;
+        slack) cause='Slack 앱의 설치와 실행 상태를 확인하세요.' ;;
+        orca) cause='Orca 실행 상태와 화면 읽기 권한을 확인하세요.' ;;
+        disk-access) cause='전체 디스크 접근 권한의 명시적 확인이 필요합니다.' ;;
+        config) cause='설정 저장을 취소했거나 필수 값을 저장하지 못했습니다. 기존 설정을 확인하세요.' ;;
+        launchd) cause='예약 실행 등록 상태와 설치 경로를 확인하세요.' ;;
+        first-run) cause='첫 실행의 인증·로그·전체 디스크 접근 상태를 확인하세요.' ;;
+      esac
+      ui_note "${labels[index]} 실패 (${duration}s)" "$cause
+로그: ~${log#"$HOME"}
+routine setup 으로 다시 실행" error
+      if [[ $step == first-run ]] && routine_jq_supported; then routine_disk_access_report; fi
+    else
+      printf '✗ %s 실패 (%ss). 상세 로그: %s\n' "$step" "$duration" "$log"
+      if [[ $step == first-run ]] && routine_jq_supported; then routine_disk_access_report; fi
+    fi
+    exit "$code"
+  else
+    marks[index]='✓'
+    durations[index]=$duration
+    if type -P jq >/dev/null; then
+      temp=$(mktemp "$log_dir/.setup-state.XXXXXXXX"); jq --arg step "$step" '.[$step]=true' "$state" > "$temp"; mv "$temp" "$state"
+    fi
+  fi
+  if [[ -t 1 ]]; then render; else printf '%s %s 완료/이미 충족 (%ss)\n' "${marks[index]}" "$step" "$(($(date +%s)-start))"; fi
+done
+if ((tty_ui)); then
+  ui_note "설정 완료 (총 $(($(date +%s)-setup_start))s)" "$(ui_color hint 'routine status 로 예약 상태 확인')
+$(ui_color hint '설정을 바꾸려면 routine setup')" complete
+  if routine_jq_supported && [[ -f $HOME/Library/Application\ Support/routine-automation/.setup-first-run-result.json ]] &&
+     jq -e '.full_disk_access.status=="denied"' "$HOME/Library/Application Support/routine-automation/.setup-first-run-result.json" >/dev/null; then
+    ui_output "$(ui_color warning '⚠') launchd /bin/bash 보호 경로 읽기 거부 — 전체 디스크 접근 확인 필요"
+  fi
+else
+  printf '설정 완료. 상세 로그: %s\n' "$log"
+  if routine_jq_supported; then routine_disk_access_report; fi
+  if [[ $skip != *' first-run '* ]]; then
+    printf '결과 파일: %s/Library/Application Support/routine-automation/scrum/%s.draft.json\n다음 예약: %s\n' "$HOME" "$(routine_day)" "$(routine_next_schedule)"
+  fi
+fi
+if routine_jq_supported; then routine_style_migration_notice; fi

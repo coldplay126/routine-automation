@@ -1,0 +1,324 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+share_dir="$script_dir/../share"
+# shellcheck source=../share/config.sh
+source "$share_dir/config.sh"
+# shellcheck source=../share/ui.sh
+source "$share_dir/ui.sh"
+if [[ ${1:-} == -h || ${1:-} == --help ]]; then
+  echo 'routine init [--non-interactive] [--slack-link URL] [--project TEXT] [--set dotted.key VALUE]'
+  echo '주요 플래그: --identity-slack-display-name --identity-git-authors --slack-team-id --slack-channel-name --slack-post-title'
+  echo '전체 스키마: 점/밑줄을 -로 바꾼 --slack-workspace-domain 등. 배열/불리언/숫자는 JSON.'
+  exit 0
+fi
+# shellcheck source=../share/sources.sh
+source "$share_dir/sources.sh"
+routine_load_config file
+ROUTINE_SETTINGS=$ROUTINE_FILE_SETTINGS
+schema=$(command jq -L "$share_dir" -nc --arg home "$HOME" --arg user "${USER:-user}" 'include "config"; defaults($home;$user)')
+non_interactive=0 link='' link_timestamp='' supplied='[]' prompt_app='' origins='{}'
+pending_values=()
+set_value() {
+  local key=$1 value=$2 type
+  type=$(command jq -r --arg key "$key" 'getpath($key|split("."))|type' <<< "$schema")
+  [[ $type != null || $key == draft.llm.model || $key == timezone || $key == draft.format.max_items_per_section ]] || { echo "알 수 없는 설정: $key" >&2; exit 2; }
+  case $key:$type in
+    draft.format.max_items_per_section:*|*:boolean|*:number|*:array|*:object) command jq empty <<< "$value" >/dev/null || { echo "JSON 값 필요: $key" >&2; exit 2; } ;;
+    *) value=$(command jq -nc --arg value "$value" 'if $value=="null" then null else $value end') ;;
+  esac
+  if [[ $key == sources.git.roots ]]; then value=$(routine_normalize_git_roots "$value") || exit 2; fi
+  ROUTINE_SETTINGS=$(command jq -c --arg key "$key" --argjson value "$value" 'setpath($key|split(".");$value)' <<< "$ROUTINE_SETTINGS")
+  supplied=$(command jq -c --arg key "$key" '.+[$key]' <<< "$supplied")
+  origins=$(command jq -c --arg key "$key" '.[$key]="입력"' <<< "$origins")
+}
+set_detected() {
+  set_value "$1" "$2"
+  origins=$(command jq -c --arg key "$1" '.[$key]="감지"' <<< "$origins")
+}
+apply_link() {
+  local link=$1 domain channel old_domain old_channel
+  if [[ $link =~ ^https://([a-z0-9][a-z0-9-]*)\.slack\.com/archives/([CG][A-Z0-9]+)/p([0-9]{16})(\?[^[:space:]]*)?$ ]]; then
+    domain=${BASH_REMATCH[1]} channel=${BASH_REMATCH[2]} link_timestamp=${BASH_REMATCH[3]}
+    old_domain=$(routine_get slack.workspace_domain) old_channel=$(routine_get slack.channel_id)
+    # Values tied to the old workspace/channel must not survive a link to a different target:
+    # they are re-detected (or asked) instead of being saved as a mixed Slack configuration.
+    if [[ -n $old_domain && $domain != "$old_domain" ]]; then
+      set_value slack.team_id ''; set_value identity.slack_display_name ''
+    fi
+    if [[ -n $old_channel && ( $channel != "$old_channel" || $domain != "$old_domain" ) ]]; then
+      set_value slack.channel_name ''; set_value slack.post_title ''
+    fi
+    set_value slack.workspace_domain "$domain"; set_value slack.channel_id "$channel"
+  else return 1; fi
+}
+while (($#)); do
+  case $1 in
+    --non-interactive) non_interactive=1; shift ;;
+    --slack-link) (($#>=2)) || exit 2; link=$2; shift 2 ;;
+    --set) (($#>=3)) || exit 2; pending_values+=("$2" "$3"); shift 3 ;;
+    -h|--help) echo 'routine init [--non-interactive] [--slack-link URL] [--project TEXT] [--set dotted.key VALUE]'; echo '모든 스키마 항목: --identity-slack-display-name 등 점/밑줄을 -로 바꾼 플래그. 배열은 JSON.'; exit 0 ;;
+    --*)
+      (($#>=2)) || { echo "값 누락: $1" >&2; exit 2; }
+      case $1 in
+        --display-name) key=identity.slack_display_name ;; --git-authors) key=identity.git_authors ;; --notion-email-like) key=identity.notion_email_like ;;
+        --team-id) key=slack.team_id ;; --workspace-domain) key=slack.workspace_domain ;; --channel-id) key=slack.channel_id ;; --channel-name) key=slack.channel_name ;; --post-title) key=slack.post_title ;; --post-time-prefix) key=slack.post_time_prefix ;;
+        --project) key=draft.project ;; --engine) key=draft.llm.engine ;; --model) key=draft.llm.model ;; --delivery-mode) key=delivery.mode ;;
+        *) key=$(command jq -r --arg flag "${1#--}" '[paths as $p|select(getpath($p)|type!="object")|($p|join("."))|select((gsub("[._]";"-"))==$flag)][0] // empty' <<< "$schema") ;;
+      esac
+      [[ -n $key ]] || { echo "알 수 없는 옵션: $1" >&2; exit 2; }
+      pending_values+=("$key" "$2"); shift 2 ;;
+    *) echo "알 수 없는 옵션: $1" >&2; exit 2 ;;
+  esac
+done
+# Read-only: the Slack desktop app records workspace IDs by domain in root-state.json.
+detect_team_id() {
+  local state=${ROUTINE_SLACK_STATE:-$HOME/Library/Application Support/Slack/storage/root-state.json} domain team
+  domain=$(routine_get slack.workspace_domain)
+  [[ -n $domain && -z $(routine_get slack.team_id) && -r $state ]] || return 0
+  team=$(command jq -r --arg d "$domain" '[(.workspaces // {})|to_entries[]|select(.value.domain==$d)|.key][0] // empty' "$state" 2>/dev/null || true)
+  [[ ! $team =~ ^T[A-Z0-9]+$ ]] || set_detected slack.team_id "$team"
+}
+if [[ -n $link ]]; then apply_link "$link" || { echo '잘못된 Slack 글 링크입니다.' >&2; exit 2; }; fi
+# A new link invalidates only saved values; explicit values in this invocation win.
+for ((value_index=0; value_index<${#pending_values[@]}; value_index+=2)); do
+  set_value "${pending_values[value_index]}" "${pending_values[value_index+1]}"
+done
+detect_team_id
+# Detect author identities without modifying git or GitHub state.
+if [[ $(routine_get identity.git_authors) == '[]' ]]; then
+  email=$(git config user.email 2>/dev/null || true)
+  github='{}'
+  if command -v gh >/dev/null; then github=$(gh api user 2>/dev/null || echo '{}'); fi
+  command jq -e 'type=="object"' <<< "$github" >/dev/null 2>&1 || github='{}'
+  authors=$(command jq -nc --arg email "$email" --argjson user "$github" '[($email|select(length>0)),(if ($user.id|type)=="number" and ($user.login|type)=="string" then "\($user.id)+\($user.login)@users.noreply.github.com" else empty end)]|unique')
+  set_detected identity.git_authors "$authors"
+fi
+if ! command jq -e 'index("draft.llm.engine")!=null' <<< "$supplied" >/dev/null && [[ $(routine_get draft.llm.engine) == auto ]]; then
+  engine=none
+  if command -v claude >/dev/null; then engine=claude; elif command -v omp >/dev/null; then engine=omp; fi
+  set_detected draft.llm.engine "$engine"
+fi
+if [[ -z $(routine_get timezone) ]]; then
+  zone=$(readlink /etc/localtime 2>/dev/null || true)
+  if [[ $zone == */zoneinfo/* ]]; then set_value timezone "${zone#*/zoneinfo/}"; fi
+fi
+for source in omp_sessions claude_sessions; do
+  if ! command jq -e --arg key "sources.$source.enabled" 'index($key)!=null' <<< "$supplied" >/dev/null &&
+     [[ ! -d $(routine_get "sources.$source.dir") ]]; then
+    set_value "sources.$source.enabled" false
+  fi
+done
+if (( !non_interactive )); then
+  [[ -t 0 ]] || { echo '비 TTY에서는 --non-interactive와 필수 플래그를 지정하세요.' >&2; exit 2; }
+  ui_stage_counter=$(mktemp "${TMPDIR:-/tmp}/routine-init-screen.XXXXXXXX")
+  printf '0\n' > "$ui_stage_counter"
+  trap 'rm -f "$ui_stage_counter"' EXIT
+  trap 'exit 130' INT
+  total=4 slack_step=0 git_step=2 sources_step=3
+  if [[ $(routine_get delivery.mode) == gui-paste ]]; then total=5 slack_step=2 git_step=3 sources_step=4; fi
+  proposals='{}'
+  ask() {
+    local key=$1 label=$2 hint=$3 current detected confirm_rc answer
+    current=$(routine_get "$key")
+    detected=$(command jq -r --arg k "$key" '.[$k] // empty' <<< "$proposals")
+    if [[ -n $detected ]]; then
+      if ui_gum_available; then
+        confirm_rc=0
+        ui_confirm "$label: $detected (Slack 화면에서 감지). 이 값을 사용할까요?" || confirm_rc=$?
+        if ((confirm_rc==2)); then return 0; fi
+        if ((confirm_rc==1)); then current=$detected; detected=''; fi
+      fi
+      if [[ -n $detected ]]; then
+        ui_output "$label: $detected $(ui_color success '·') $(ui_color hint '감지')"
+        set_detected "$key" "$detected"
+        return
+      fi
+    fi
+    while :; do
+      if ! answer=$(ui_input "$label" "$hint" "$current"); then return 0; fi
+      [[ -n $answer ]] && break
+      ui_output "$(ui_color warning '⚠') 값이 필요합니다."
+    done
+    [[ $answer == "$(routine_get "$key")" && -n $answer ]] || set_value "$key" "$answer"
+  }
+  link_stage() {
+    local domain channel current_link answer
+    ui_stage 1 "$total" 'Slack 글 링크'
+    domain=$(routine_get slack.workspace_domain) channel=$(routine_get slack.channel_id)
+    current_link=''; [[ -z $domain || -z $channel ]] || current_link="https://$domain.slack.com/archives/$channel/p…"
+    while :; do
+      if ! answer=$(ui_input '스크럼 글 링크' 'Slack에서 오늘 스크럼 글에 마우스를 올리고 [⋮ › 링크 복사] 후 붙여넣기' "$current_link"); then break; fi
+      if [[ $answer == "$current_link" && -n $current_link ]]; then break; fi
+      if apply_link "$answer"; then proposals='{}'; detect_team_id; break; fi
+      ui_output "$(ui_color warning '⚠') 링크 형식이 아닙니다. https://<워크스페이스>.slack.com/archives/<채널>/p… 형태여야 합니다."
+    done
+    [[ -n $(routine_get slack.team_id) ]] || ask slack.team_id 'Slack 워크스페이스 ID' 'T로 시작하는 값. 브라우저 Slack 주소 app.slack.com/client/T…/ 에서 확인'
+  }
+  slack_snapshot() {
+    local share_dir=$1 orca=$2 link_timestamp=$3 visible attempt
+    # shellcheck source=../share/config.sh
+    source "$share_dir/config.sh"
+    # shellcheck source=../share/orca.sh
+    source "$share_dir/orca.sh"
+    open -g "slack://channel?team=$(routine_get slack.team_id)&id=$(routine_get slack.channel_id)" || return
+    for attempt in 1 2 3 4 5; do
+      if visible=$(orca_slack_state "$orca"); then
+        if command jq -L "$share_dir" -e --arg post "$link_timestamp" 'include "slack"; linked_post_visible($post)' <<< "$visible" >/dev/null ||
+           { [[ $attempt == 5 ]] && command jq -L "$share_dir" -e --arg channel "$(routine_get slack.channel_id)" 'include "slack"; channel_visible($channel)' <<< "$visible" >/dev/null; }; then
+          command jq -L "$share_dir" -c --arg post "$link_timestamp" 'include "slack"; init_proposals($post)' <<< "$visible"
+          return
+        fi
+      fi
+      [[ $attempt == 5 ]] || sleep 1
+    done
+    printf '{}\n'
+  }
+  slack_stage() {
+    local visible original_app snapshot rc=0
+    ui_stage "$slack_step" "$total" 'Slack 정보'
+    # Permission setup belongs to setup's earlier Orca stage. Standalone init
+    # only navigates after a screenshot-bearing, readable snapshot succeeds.
+    # shellcheck source=../share/orca.sh
+    source "$share_dir/orca.sh"
+    # shellcheck source=../share/gui-guard.sh
+    source "$share_dir/gui-guard.sh"
+    ROUTINE_FOCUS_HELPER="$share_dir/app-focus.js"
+    if orca=$(find_orca) && visible=$(orca_slack_state "$orca") &&
+       original_app=$(osascript -l JavaScript "$ROUTINE_FOCUS_HELPER" capture) &&
+       prompt_terminal_app "$original_app"; then
+      ui_output "$(ui_color hint 'Slack 화면을 잠깐 그 채널로 이동합니다 (클릭·입력·전송 없음).')"
+      prompt_app=$original_app
+      # Export only to this child. The spinner's command executes exactly once,
+      # and the parent always checks focus again before asking any question.
+      export -f slack_snapshot
+      snapshot=$(export ROUTINE_SETTINGS; ui_spin 'Slack 화면 이동' /bin/bash -c 'slack_snapshot "$@"' _ "$share_dir" "$orca" "$link_timestamp") || rc=$?
+      export -n -f slack_snapshot
+      stabilize_prompt_focus "$original_app"
+      if ((rc==0)) && command jq -e 'type=="object"' <<< "$snapshot" >/dev/null 2>&1; then proposals=$snapshot; fi
+    fi
+    ask slack.channel_name '스크럼 채널 이름' '# 없이 (예: daily-scrum)'
+    ask identity.slack_display_name '내 Slack 표시 이름' '스레드 댓글에 보이는 내 이름 그대로 (예: 예제 사용자)'
+    ask slack.post_title '스크럼 글 제목' '매일 올라오는 글의 제목 (예: 예제팀 스크럼)'
+  }
+  summary_row() {
+    local label=$1 value=$2 origin=${3:-} role=hint padding line first=1 tag='' separator
+    case $origin in 감지) role=success ;; 입력) role=accent ;; 미설정) role=warning ;; esac
+    [[ -z $origin ]] || tag="  $(ui_color "$role" '·') $(ui_color hint "$origin")"
+    separator=$(ui_color hint '│')
+    padding=$(command jq -nr --arg label "$label" '14-($label|explode|map(if .>127 then 2 else 1 end)|add)|[0,.]|max')
+    while IFS= read -r line; do
+      if ((first)); then
+        printf -v line '%s%*s %s %s%s' "$(ui_color strong "$label")" "$padding" '' "$separator" "$line" "$tag"
+        first=0
+      else line="               $separator $line"; fi
+      summary_body+="${summary_body:+$'\n'}$line"
+    done <<< "$value"
+  }
+  summary_field() {
+    local key=$1 label=$2 value origin
+    value=$(routine_get "$key")
+    origin=$(command jq -r --arg key "$key" '.[$key] // "기존 값"' <<< "$origins")
+    if [[ -z $value ]]; then value='—'; origin='미설정'; fi
+    summary_row "$label" "$value" "$origin"
+  }
+  show_summary() {
+    local full=${1:-0} summary_body='' authors author_origin delivery source sources='' roots weekdays
+    summary_row '워크스페이스' "$(routine_get slack.workspace_domain) / $(routine_get slack.team_id)"
+    summary_field slack.channel_name '채널'
+    summary_row '채널 ID' "$(routine_get slack.channel_id)"
+    summary_field identity.slack_display_name '표시 이름'
+    summary_field slack.post_title '글 제목'
+    summary_body+=$'\n'
+    authors=$(command jq -r '.identity.git_authors|if length==0 then "—" else join("\n") end' <<< "$ROUTINE_SETTINGS")
+    author_origin=$(command jq -r '.["identity.git_authors"] // "기존 값"' <<< "$origins")
+    [[ $authors != '—' ]] || author_origin='미설정'
+    summary_row 'git 작성자' "$authors" "$author_origin"
+    if ((full)); then
+      roots=$(command jq -r '.sources.git.roots|if length==0 then "선택 없음" else join("\n") end' <<< "$ROUTINE_SETTINGS")
+      summary_row 'Git 위치' "$roots"
+      while IFS= read -r source; do sources+="${sources:+$'\n'}$(routine_source_label "$source")"; done < <(command jq -r '.sources|to_entries[]|select(.value.enabled)|.key' <<< "$ROUTINE_SETTINGS")
+      summary_row '수집 소스' "${sources:-선택 없음 (확인 필요)}"
+    fi
+    summary_body+=$'\n'
+    summary_field draft.llm.engine 'LLM'
+    [[ $(routine_get draft.llm.model) == null || -z $(routine_get draft.llm.model) ]] || summary_row 'LLM 모델' "$(routine_get draft.llm.model)"
+    delivery='클립보드 (clipboard)'
+    [[ $(routine_get delivery.mode) != gui-paste ]] || delivery='Slack 자동 붙여넣기 (gui-paste, 전송 안 함)'
+    summary_row '전달 방식' "$delivery"
+    if ((full)); then
+      weekdays=$(command jq -r '.morning.weekdays|map(["","월","화","수","목","금","토","일"][.])|join("·")' <<< "$ROUTINE_SETTINGS")
+      summary_row '예약 시각' "$weekdays $(routine_get morning.time) / $(routine_get timezone)"
+      if [[ $(routine_get delivery.mode) == gui-paste ]]; then
+        summary_row '붙여넣기 시간' "$(routine_get delivery.window.start)–$(routine_get delivery.window.end) / $(routine_get delivery.no_post_after) 이후 새 글 금지"
+      fi
+    fi
+    ui_note '설정 요약' "$summary_body" summary
+  }
+  git_stage() {
+    ui_stage "$git_step" "$total" 'Git 저장소 위치'
+    show_summary
+    routine_select_git_roots "$@"
+    if [[ $(routine_get sources.git.roots) == '[]' && $(routine_get sources.git.enabled) == true ]]; then
+      local rc=0
+      ui_confirm 'Git 위치가 비어 있습니다. git 커밋 수집을 끌까요?' || rc=$?
+      if ((rc==0)); then set_value sources.git.enabled false
+      elif ((rc==1)) && [[ ${1:-} == --keep ]]; then sources_stage; fi
+    fi
+  }
+  sources_stage() {
+    ui_stage "$sources_step" "$total" '수집 소스'
+    routine_select_sources
+  }
+  authors_stage() {
+    local current answer authors
+    ui_stage '' '' 'git 작성자'
+    current=$(command jq -r '.identity.git_authors|join(", ")' <<< "$ROUTINE_SETTINGS")
+    if answer=$(ui_input 'git 작성자' '여러 이메일·이름은 쉼표로 구분하세요' "$current") && [[ $answer != "$current" ]]; then
+      authors=$(command jq -nc --arg text "$answer" '$text|split(",")|map(gsub("^\\s+|\\s+$";""))|map(select(length>0))|unique')
+      set_value identity.git_authors "$authors"
+    fi
+  }
+  link_stage
+  ((slack_step==0)) || slack_stage
+  git_stage
+  sources_stage
+  while :; do
+    ui_stage "$total" "$total" '확인'
+    show_summary 1
+    errors=$(command jq -L "$share_dir" -r 'include "config"; required_errors|join("\n")' <<< "$ROUTINE_SETTINGS")
+    if ! command jq -L "$share_dir" -e 'include "config"; config_ok' <<< "$ROUTINE_SETTINGS" >/dev/null; then
+      errors+="${errors:+$'\n'}설정 스키마 오류: 제공한 설정 값의 형식·범위를 확인하세요."
+    fi
+    if [[ -n $errors ]]; then
+      ui_note '저장 전 확인 필요' "$errors
+항목 고치기로 수정한 뒤 저장하세요. 입력한 값은 유지됩니다." warning
+    fi
+    action=$(ui_choose_one '저장 전 최종 확인' '[{"value":"save","label":"저장"},{"value":"edit","label":"항목 고치기"},{"value":"cancel","label":"취소"}]') || action=cancel
+    case $action in
+      save) if [[ -z $errors ]]; then break; fi ;;
+      edit)
+        items='[{"value":"link","label":"Slack 글 링크"}]'
+        if ((slack_step)); then items=$(command jq -c '.+[{value:"slack",label:"Slack 정보"}]' <<< "$items"); fi
+        items=$(command jq -c '.+[{value:"git",label:"Git 저장소 위치"},{value:"sources",label:"수집 소스"},{value:"authors",label:"git 작성자"}]' <<< "$items")
+        if target=$(ui_choose_one '고칠 항목 선택' "$items"); then
+          # A new link may point at another workspace/channel: re-run Slack detection for gui-paste.
+          case $target in link) link_stage; [[ $(routine_get delivery.mode) != gui-paste ]] || slack_stage ;; slack) slack_stage ;; git) git_stage --keep ;; sources) sources_stage ;; authors) authors_stage ;; esac
+        fi ;;
+      *)
+        ui_clear_stage
+        [[ ${ROUTINE_SETUP_INIT:-0} == 1 ]] || ui_output "$(ui_color warning '–') 설정 저장 취소, 기존 설정 유지"
+        exit 1 ;;
+    esac
+  done
+fi
+command jq -L "$share_dir" -e 'include "config"; config_ok' <<< "$ROUTINE_SETTINGS" >/dev/null || { echo '설정 스키마 오류' >&2; exit 2; }
+routine_require_config
+routine_save_config "$ROUTINE_SETTINGS"
+if ((non_interactive)); then
+  printf '설정 저장: %s (0600)\n' "$(routine_config_path)"
+else
+  ui_clear_stage
+  [[ ${ROUTINE_SETUP_INIT:-0} == 1 ]] || ui_output "$(ui_color success '✓') 설정 저장"
+fi

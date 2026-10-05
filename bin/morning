@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+set -euo pipefail
+original_umask=$(umask)
+umask 077
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+share_dir="$script_dir/../share"
+# shellcheck source=../share/config.sh
+source "$share_dir/config.sh"
+setup_marker="$HOME/Library/Application Support/routine-automation/.setup-first-run"
+setup_request=''; lock_owned=0; disk_access=unverified
+if [[ -f $setup_marker ]]; then
+  setup_request=$(cat "$setup_marker")
+  if [[ -d $HOME/Library/Mail ]]; then
+    if /bin/ls -A "$HOME/Library/Mail" >/dev/null 2>&1; then disk_access=readable
+    else disk_access=denied; fi
+  fi
+fi
+finish() {
+  local exit_code=$? result temp
+  trap - EXIT
+  if [[ -n $setup_request ]]; then
+    result="${setup_marker%/*}/.setup-first-run-result.json"
+    temp=$(mktemp "${setup_marker%/*}/.first-run.XXXXXXXX")
+    command jq -nc --arg request "$setup_request" --argjson code "$exit_code" --arg status "$disk_access" '{request_id:$request,exit_code:$code,full_disk_access:{status:$status,protected_path:"~/Library/Mail",context:"first-run morning /bin/bash"}}' > "$temp"
+    mv "$temp" "$result"
+    if [[ -f $setup_marker && $(cat "$setup_marker") == "$setup_request" ]]; then rm -f "$setup_marker"; fi
+  fi
+  if ((lock_owned)); then rm -f -- "$lock/pid" "$lock/stage"; rmdir "$lock"; fi
+  exit "$exit_code"
+}
+trap finish EXIT
+routine_load_config
+usage() { echo 'Usage: morning [--dry-run] [--skip STEP]... [--only STEP]...'; }
+steps=(omp-update claude-update npm-update scrum-collect scrum-draft scrum-paste aws-session)
+skip=(__none__) only=(__none__) dry_run=0
+valid_step() {
+  local step
+  for step in "${steps[@]}"; do [[ $step == "$1" ]] && return 0; done
+  return 1
+}
+while (($#)); do
+  case $1 in
+    --dry-run) dry_run=1; shift ;;
+    --skip|--only)
+      (($# >= 2)) || { echo "Missing value: $1" >&2; exit 2; }
+      valid_step "$2" || { echo "Unknown step: $2" >&2; exit 2; }
+      if [[ $1 == --skip ]]; then skip+=("$2"); else only+=("$2"); fi
+      shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+routine_require_config
+contains() {
+  local item
+  for item in "${@:2}"; do [[ $item == "$1" ]] && return 0; done
+  return 1
+}
+for extra in omp_update claude_update npm_update aws_session; do
+  [[ $(routine_get "morning.extra_steps.$extra") == true ]] || skip+=("${extra//_/-}")
+done
+if [[ -f $setup_marker ]]; then
+  skip+=(omp-update claude-update npm-update aws-session scrum-paste)
+fi
+log_dir="$HOME/Library/Logs/routine-automation"
+commands=('omp update' 'claude update' 'npm update -g' "$script_dir/scrum-collect" "$script_dir/scrum-draft" "$script_dir/scrum-paste --auto" 'aws-session-check')
+if ((dry_run)); then
+  for index in "${!steps[@]}"; do
+    step=${steps[index]}
+    if { [[ ${only[1]-} ]] && ! contains "$step" "${only[@]}"; } || contains "$step" "${skip[@]}"; then
+      printf '%s: skipped\n' "$step"
+    else
+      printf '%s: %s\n' "$step" "${commands[index]}"
+      if [[ $step == scrum-paste && $(routine_get delivery.mode) == clipboard ]]; then
+        printf 'scrum-paste: 초안 준비 알림 (클립보드 미변경)\n'
+      fi
+    fi
+  done
+  exit 0
+fi
+mkdir -p "$log_dir"
+chmod 700 "$log_dir"
+log="$log_dir/morning-$(date '+%Y-%m-%d').log"
+lock="$log_dir/.morning.lock"
+notify() {
+  if command -v osascript >/dev/null; then
+    osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "아침 루틴"' -e 'end run' "$1" >> "$log" 2>&1 || true
+  fi
+}
+skip_locked() {
+  printf 'morning: already running\n' | tee -a "$log"
+  notify '아침 루틴 건너뜀: 이미 실행 중'
+  exit 0
+}
+if ! mkdir "$lock" 2>/dev/null; then
+  owner=$(cat "$lock/pid" 2>/dev/null || true)
+  modified=$(stat -f %m "$lock" 2>/dev/null || date +%s)
+  age=$(($(date +%s) - modified))
+  if [[ $owner =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null && ((age < 4200)); then skip_locked; fi
+  # A newly created lock with no pid may still be initializing.
+  if [[ -z $owner ]] && ((age < 10)); then skip_locked; fi
+  recovery="$log_dir/.morning.recovery.lock"
+  if ! mkdir "$recovery" 2>/dev/null; then
+    recovery_modified=$(stat -f %m "$recovery" 2>/dev/null || date +%s)
+    recovery_age=$(($(date +%s) - recovery_modified))
+    ((recovery_age >= 60)) || skip_locked
+    rm -rf -- "$recovery"
+    mkdir "$recovery" 2>/dev/null || skip_locked
+  fi
+  rm -rf -- "$lock"
+  if ! mkdir "$lock" 2>/dev/null; then rmdir "$recovery"; skip_locked; fi
+  rmdir "$recovery"
+  printf 'morning: recovered stale lock\n' | tee -a "$log"
+fi
+printf '%s\n' "$$" > "$lock/pid"
+printf 'pre-paste\n' > "$lock/stage"
+lock_owned=1
+if command -v gtimeout >/dev/null; then timeout_cmd=gtimeout
+elif command -v timeout >/dev/null; then timeout_cmd=timeout
+else
+  echo 'morning: gtimeout or timeout required' | tee -a "$log" >&2
+  exit 1
+fi
+failures=() summary=() failures_count=0
+for index in "${!steps[@]}"; do
+  step=${steps[index]}
+  if { [[ ${only[1]-} ]] && ! contains "$step" "${only[@]}"; } || contains "$step" "${skip[@]}"; then
+    summary+=("$step:skipped")
+    if [[ $step == scrum-paste ]]; then printf 'paste-done\n' > "$lock/stage"; fi
+    continue
+  fi
+  start=$(date +%s)
+  if [[ $step == scrum-paste && $(routine_get delivery.mode) == clipboard ]]; then
+    summary+=("$step:clipboard")
+    printf 'paste-done\n' > "$lock/stage"
+    continue
+  fi
+  case $step in
+    omp-update) args=(omp update) ;;
+    claude-update) args=(claude update) ;;
+    npm-update) args=(npm update -g) ;;
+    aws-session) args=(aws-session-check) ;;
+    scrum-collect) args=(env ROUTINE_COLLECT_PROGRESS=1 "$script_dir/scrum-collect") ;;
+    scrum-draft) args=(env -u ROUTINE_ALLOW_GUI "$script_dir/scrum-draft") ;;
+    scrum-paste) args=(env ROUTINE_MORNING_LOCK_PID="$$" "$script_dir/scrum-paste" --auto) ;;
+  esac
+  printf '%s START %s\n' "$(date '+%FT%T%z')" "$step" >> "$log"
+  if (umask "$original_umask"; exec "$timeout_cmd" -k 30 600 "${args[@]}" </dev/null >> "$log" 2>&1); then status=ok; code=0
+  else
+    code=$?
+    if [[ $step == scrum-paste && ( $code == 3 || $code == 4 ) ]]; then status=ok
+    else status=fail; failures+=("$step"); ((failures_count+=1)); fi
+  fi
+  if [[ $step == scrum-paste ]]; then printf 'paste-done\n' > "$lock/stage"; fi
+  elapsed=$(($(date +%s) - start))
+  detail=''
+  if [[ $code == 124 || $code == 137 ]]; then detail='timeout, '; fi
+  summary+=("$step:$status(${detail}${elapsed}s, exit $code)")
+  printf '%s END %s %s %ss exit=%s\n' "$(date '+%FT%T%z')" "$step" "$status" "$elapsed" "$code" >> "$log"
+done
+printf '%s\n' "${summary[@]}" | tee -a "$log"
+if ((failures_count)); then
+  notice="실패: ${failures[*]}"
+else
+  notice='모든 단계 완료'
+fi
+if contains 'scrum-draft:ok' "${summary[@]%%(*}"; then
+  paste_day=$(date '+%Y-%m-%d')
+  if [[ -n ${ROUTINE_NOW:-} ]]; then
+    stamp=${ROUTINE_NOW/Z/+0000}
+    stamp=$(printf '%s' "$stamp" | sed -E 's/([+-][0-9]{2}):([0-9]{2})$/\1\2/')
+    paste_day=$(date -j -f '%Y-%m-%dT%H:%M:%S%z' "$stamp" '+%Y-%m-%d')
+  fi
+  paste_out="$HOME/Library/Application Support/routine-automation/scrum/$paste_day"
+  if [[ $(routine_get delivery.mode) == clipboard ]]; then
+    notice+=' — 초안 준비 — 검토: routine review'
+  elif [[ -e $paste_out.paste-attention ]]; then
+    notice+=' — 스크럼 붙여넣기 상태 확인 필요, 전송 금지'
+  elif [[ -e $paste_out.pasted ]]; then
+    notice+=' — 스크럼 초안을 스레드 입력창에 준비했습니다. 확인 후 직접 전송'
+  elif [[ -e $paste_out.paste-skipped ]]; then
+    notice+=' — 스크럼 자동 붙여넣기 종결, 알림/로그 확인'
+  else
+    notice+=' — 스크럼 초안 준비됨 — 자동 scrum-paste 대기, 전송은 직접 확인'
+  fi
+  notice+="$(routine_draft_omission_notice "$paste_out.draft.json")"
+fi
+# shellcheck source=../share/update.sh
+source "$share_dir/update.sh"
+update_notice=$(routine_update_notice 2>/dev/null) || update_notice=''
+if [[ -n $update_notice ]]; then
+  printf '%s\n' "$update_notice" | tee -a "$log"
+  notice+=$'\n'"$update_notice"
+fi
+notify "$notice"
+((failures_count == 0))

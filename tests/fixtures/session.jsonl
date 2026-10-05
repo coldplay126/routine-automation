@@ -1,0 +1,6 @@
+{"type":"title","title":"Fixture planning session"}
+{"type":"session","id":"fixture-session-1","timestamp":"2026-09-25T09:00:00Z","cwd":"/fixture/project"}
+{"type":"message","timestamp":"2026-09-25T09:10:00Z","message":{"role":"user","attribution":"user","content":[{"type":"text","text":"Reviewed sprint scope"}]}}
+{"type":"message","timestamp":"2026-09-25T09:12:00Z","message":{"role":"user","attribution":"agent","content":[{"type":"text","text":"Agent text omitted"}]}}
+{"type":"message","timestamp":"2026-09-24T09:10:00Z","message":{"role":"user","attribution":"user","content":[{"type":"text","text":"Out of window"}]}}
+{"type":"message","timestamp":"2026-09-25T09:13:00Z","message":{"role":"user","attribution":"user","content":[{"type":"text","text":"<system-reminder>Injected content"}]}}

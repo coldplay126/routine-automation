@@ -1,0 +1,59 @@
+#!/usr/bin/expect -f
+set timeout 30
+set helper [lindex $argv 0]
+set transcript [lindex $argv 1]
+set command [lrange $argv 2 end]
+proc snapshot {name transcript} {
+  global env
+  if {[info exists env(REAL_GUM_SHOTS)] && [info exists env(REAL_GUM_CAPTURE)] && $env(REAL_GUM_CAPTURE) eq "1"} {
+    if {[lsearch {confirm input choose-multiple sources-choice summary-card} $name] >= 0} {
+      expect -timeout 1 {
+        -re {.+} { exp_continue -continue_timer }
+        timeout {}
+        eof { puts stderr "Real gum ended while capturing: $name"; exit 1 }
+      }
+    }
+    # script -F flushes each write and preserves original UTF-8 bytes.
+    file copy -force $transcript [file join $env(REAL_GUM_SHOTS) "$name.ans"]
+  }
+}
+spawn /usr/bin/script -Fq $transcript /bin/bash $helper {*}$command
+if {[info exists env(REAL_GUM_STATIC)] && $env(REAL_GUM_STATIC) ne ""} {
+  expect {
+    -re {STATIC_RC=0} { snapshot $env(REAL_GUM_STATIC) $transcript; expect eof; wait; exit 0 }
+    -re {STATIC_RC=([0-9]+)} { puts stderr "Static UI capture failed"; exit 1 }
+    timeout { puts stderr "Static UI capture timeout"; exit 1 }
+    eof { puts stderr "Static UI capture ended without status"; exit 1 }
+  }
+}
+set surfaces {confirm input choose-multiple sources-choice}
+set index 0
+# Wait for each widget once: cursor blinks may redraw the same header without
+# starting a new question, so repeated render bytes must not send extra keys.
+foreach header {{버튼 대비 확인} {스크럼 글 링크} {Git 저장소 위치 \(Space로 선택, Enter로 확정\)} {수집 소스 선택 \(Space로 선택, Enter로 확정\)}} {
+  expect {
+    -re $header { snapshot [lindex $surfaces $index] $transcript; incr index; send -- "\r" }
+    timeout { puts stderr "Real gum prompt timeout: $header"; exit 1 }
+    eof { puts stderr "Real gum ended before: $header"; exit 1 }
+  }
+}
+expect {
+  -re {저장 전 최종 확인} {
+    snapshot summary-card $transcript
+    if {[info exists env(REAL_GUM_SUCCESS)] && $env(REAL_GUM_SUCCESS) eq "1"} { send -- "\r" } else { send -- "\033\[B\033\[B\r" }
+  }
+  timeout { puts stderr "Real gum final confirmation timeout"; exit 1 }
+  eof { puts stderr "Real gum ended before final confirmation"; exit 1 }
+}
+expect {
+  -re {PTY_RC=([0-9]+)} {
+    set success 0
+    if {[info exists env(REAL_GUM_SUCCESS)] && $env(REAL_GUM_SUCCESS) eq "1"} { set success 1 }
+    set expected [expr {$success ? 0 : 1}]
+    if {$expect_out(1,string) != $expected} { puts stderr "Real gum final exit mismatch"; exit 1 }
+    snapshot [expr {$success ? "setup-success" : "setup-checklist"}] $transcript
+    expect eof; wait; exit 0
+  }
+  timeout { puts stderr "Real gum cancellation timeout"; exit 1 }
+  eof { puts stderr "Real gum ended without status"; exit 1 }
+}

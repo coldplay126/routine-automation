@@ -1,0 +1,44 @@
+#!/usr/bin/expect -f
+set timeout 30
+set helper [lindex $argv 0]
+set transcript [lindex $argv 1]
+set mode [lindex $argv 2]
+set command [lrange $argv 3 end]
+spawn /usr/bin/script -q $transcript /bin/bash $helper {*}$command
+set finals 0
+while {1} {
+  expect {
+    -re {선택 의존성 gum을 설치할까요[^\r\n]*\[y/N\] } {
+      if {$mode eq "decline"} { send -- "n\r" } else { send -- "y\r" }
+    }
+    -re {스크럼 글 링크.*\]: } { send -- "\r" }
+    -re {Git 위치 선택: } { send -- "\r" }
+    -re {수집 소스 선택: } { send -- "\r" }
+    -re {git 작성자.*\]: } { send -- "text-edited@example.com\r" }
+    -re {고칠 항목 선택 \(번호\): } { send -- "4\r" }
+    -re {저장 전 최종 확인 \(번호\): } {
+      incr finals
+      if {$mode eq "text-retry"} {
+        set count [open [file join [file dirname $env(GUM_RECORD)] text-final-attempts] w]
+        puts $count $finals
+        close $count
+        if {$finals == 1} { send -- "\r"
+        } elseif {$finals == 2} { send -- "99\r"
+        } elseif {$finals == 3} { send -- "오타\r"
+        } else { send -- "1\r" }
+        exp_continue
+      }
+      if {$mode eq "text-edit" && $finals == 1} { send -- "2\r"
+      } elseif {$mode eq "text-cancel"} { send -- "3\r"
+      } else { send -- "1\r" }
+    }
+    -re {PTY_RC=0} { if {$mode eq "cancel" || $mode eq "final-interrupt" || $mode eq "final-cancel" || $mode eq "final-escape" || $mode eq "text-cancel"} { puts stderr "Cancellation did not stop setup"; exit 1 }; expect eof; wait; exit 0 }
+    -re {PTY_RC=([0-9]+)} {
+      if {($mode eq "cancel" || $mode eq "final-interrupt") && $expect_out(1,string) == 130} { expect eof; wait; exit 0 }
+      if {($mode eq "escape" || $mode eq "abnormal" || $mode eq "unknown" || $mode eq "final-cancel" || $mode eq "final-escape" || $mode eq "text-cancel") && $expect_out(1,string) == 1} { expect eof; wait; exit 0 }
+      puts stderr "Gum PTY command failed: $expect_out(1,string)"; exit 1
+    }
+    timeout { puts stderr "Gum PTY timeout: $mode"; exit 1 }
+    eof { puts stderr "Gum PTY ended without status: $mode"; exit 1 }
+  }
+}

@@ -1,0 +1,28 @@
+# Disable every installed discovery source that can supply MCP/custom tools.
+# Authentication/default model selection is not overridden. cursor is also a model
+# provider ID: selecting a Cursor default model is intentionally unsupported here.
+disabledProviders:
+  - native
+  - claude
+  - claude-md
+  - claude-plugins
+  - codex
+  - gemini
+  - cursor
+  - windsurf
+  - vscode
+  - opencode
+  - mcp-json
+  - omp-plugins
+  - agent-plugins
+  - agents
+  - agents-md
+  - cline
+  - github
+  - ssh-json
+memory:
+  backend: off
+autolearn:
+  enabled: false
+advisor:
+  enabled: false

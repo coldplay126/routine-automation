@@ -1,0 +1,520 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+# launchd starts with a minimal PATH; append the usual tool locations after the caller's PATH.
+export PATH="${PATH:-/usr/bin:/bin}:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin"
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+share_dir="$script_dir/../share"
+if [[ -L ${BASH_SOURCE[0]} ]]; then
+  script_dir=$(cd -- "$(dirname -- "$(readlink "${BASH_SOURCE[0]}")")" && pwd)
+  share_dir="$script_dir/../share"
+fi
+# shellcheck source=../share/config.sh
+source "$share_dir/config.sh"
+routine_load_config
+# shellcheck source=../share/orca.sh
+source "$share_dir/orca.sh"
+# shellcheck source=../share/gui-guard.sh
+source "$share_dir/gui-guard.sh"
+# shellcheck source=../share/sources.sh
+source "$share_dir/sources.sh"
+usage() {
+  cat <<'HELP'
+Usage: scrum-collect [--since YYYY-MM-DD|ISO] [--until ISO] [--out DIR] [--sources git,prs,sessions,jira,notion,slack]
+Collect local activity without fetching or modifying source databases.
+HELP
+}
+
+since_arg='' until_arg='' out="${HOME}/Library/Application Support/routine-automation/scrum"
+sources=$(routine_sources)
+while (($#)); do
+  case $1 in
+    --since|--until|--out|--sources)
+      (($# >= 2)) || { printf 'Missing value: %s\n' "$1" >&2; exit 2; }
+      case $1 in
+        --since) since_arg=$2 ;; --until) until_arg=$2 ;; --out) out=$2 ;; --sources) sources=$2 ;;
+      esac
+      shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+
+# A null timezone inherits the system timezone.
+# BSD date interprets a date-only value in TZ and ISO timestamps with explicit offsets.
+to_epoch() {
+  local value=$1
+  if [[ $value =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    date -j -f '%Y-%m-%d %H:%M:%S' "$value 00:00:00" '+%s'
+  elif [[ $value =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})$ ]]; then
+    value=${value%%.*}$( [[ $value == *.* ]] && printf '%s' "${value#*.}" | sed -E 's/^[0-9]+//' || true )
+    value=${value/Z/+0000}
+    value=$(printf '%s' "$value" | sed -E 's/([+-][0-9]{2}):([0-9]{2})$/\1\2/')
+    date -j -f '%Y-%m-%dT%H:%M:%S%z' "$value" '+%s'
+  else
+    return 1
+  fi
+}
+iso_at() { date -u -r "$1" '+%Y-%m-%dT%H:%M:%SZ'; }
+now_epoch=$(to_epoch "${ROUTINE_NOW:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}") || { echo 'Invalid ROUTINE_NOW' >&2; exit 2; }
+if [[ -z $since_arg ]]; then
+  since_arg=$(routine_collect_since "$(date -r "$now_epoch" '+%Y-%m-%d')")
+fi
+since_epoch=$(to_epoch "$since_arg") || { echo 'Invalid --since' >&2; exit 2; }
+until_epoch=$now_epoch
+if [[ $(routine_get collect.until) == today_start ]]; then until_epoch=$(to_epoch "$(date -r "$now_epoch" '+%Y-%m-%d')"); fi
+if [[ -n $until_arg ]]; then until_epoch=$(to_epoch "$until_arg") || { echo 'Invalid --until' >&2; exit 2; }; fi
+((since_epoch <= until_epoch)) || { echo '--since exceeds --until' >&2; exit 2; }
+since=$(iso_at "$since_epoch") until=$(iso_at "$until_epoch")
+until_date=$(date -r "$until_epoch" '+%Y-%m-%d')
+
+for cmd in jq sqlite3 git; do command -v "$cmd" >/dev/null || { printf 'Missing dependency: %s\n' "$cmd" >&2; exit 2; }; done
+[[ $sources =~ [^,[:space:]] ]] || { echo 'No sources selected' >&2; exit 2; }
+if [[ ${ROUTINE_GIT_AUTHORS+x} == x && ! ${ROUTINE_GIT_AUTHORS} =~ [^[:space:]] ]]; then
+  echo 'ROUTINE_GIT_AUTHORS must not be empty' >&2; exit 2
+fi
+if [[ ! -e $out ]]; then mkdir -p "$out"; chmod 700 "$out"
+elif [[ ! -d $out ]]; then echo 'Output must be a directory' >&2; exit 2
+fi
+work=$(mktemp -d "${TMPDIR:-/tmp}/scrum-collect.XXXXXXXX")
+rc=0
+trap 'rc=$?; rm -rf -- "$work"; exit "$rc"' EXIT
+for source in git prs sessions claude_sessions jira notion slack; do printf '[]\n' > "$work/$source.json"; done
+printf '[]\n' > "$work/errors.json"
+add_error() {
+  jq -nc --arg source "$1" --arg message "$2" '{source:$source,message:$message}' >> "$work/errors.rows"
+}
+# Prefer a consistent online backup, but Chrome can hold an exclusive rollback
+# lock for its entire session. Fall back to private copies of the DB and sidecars,
+# recovering journals only there. Size/inode/high-resolution time checks bound
+# copy races; quick_check rejects damaged snapshots, not every logical race.
+# Validate private copies writable: Apple's read-only quick_check can skip CHECKs.
+snapshot_sqlite() {
+  local source=$1 target=$2 limit stage attempt suffix before after copied
+  limit=$(command -v gtimeout || command -v timeout || true)
+  [[ $target != *\"* ]] || return 1
+  local -a run
+  run=(sqlite3 -readonly "file:$source?mode=ro" ".timeout 250" ".backup main \"$target\"")
+  if [[ -n $limit ]]; then run=("$limit" -k 1 3 "${run[@]}"); fi
+  if "${run[@]}" >/dev/null 2>&1 </dev/null; then
+    # Normalize only our backup so later read-only queries need no WAL/shm.
+    [[ $(sqlite3 "$target" 'PRAGMA journal_mode=DELETE;' 2>/dev/null </dev/null) == delete ]] || return 1
+    [[ $(sqlite3 "$target" 'PRAGMA quick_check;' 2>/dev/null </dev/null) == ok ]]
+    return
+  fi
+  rm -f -- "$target" "$target-journal" "$target-wal" "$target-shm"
+  stage=$(mktemp -d "$target.copy.XXXXXXXX") || return 1
+  for attempt in 1 2 3; do
+    rm -f -- "$stage/database" "$stage/database-journal" "$stage/database-wal" "$stage/database-shm"
+    before=$(for suffix in '' -journal -wal -shm; do
+      printf '%s:' "$suffix"
+      if [[ -e $source$suffix ]]; then
+        stat -f '%d:%i:%z:%.9Fm:%.9Fc' "$source$suffix" || exit 1
+      else printf 'absent\n'; fi
+    done) || continue
+    copied=1
+    for suffix in '' -journal -wal -shm; do
+      [[ -n $suffix && ! -e $source$suffix ]] && continue
+      cp -- "$source$suffix" "$stage/database$suffix" || { copied=0; break; }
+    done
+    ((copied)) || continue
+    after=$(for suffix in '' -journal -wal -shm; do
+      printf '%s:' "$suffix"
+      if [[ -e $source$suffix ]]; then
+        stat -f '%d:%i:%z:%.9Fm:%.9Fc' "$source$suffix" || exit 1
+      else printf 'absent\n'; fi
+    done) || continue
+    [[ $before == "$after" ]] || continue
+    # Opening the writable *copy* rolls back a hot journal or replays its WAL.
+    [[ $(sqlite3 "$stage/database" 'PRAGMA journal_mode=DELETE;' 2>/dev/null </dev/null) == delete ]] || break
+    [[ $(sqlite3 "$stage/database" 'PRAGMA quick_check;' 2>/dev/null </dev/null) == ok ]] || break
+    mv -- "$stage/database" "$target" || break
+    rm -rf -- "$stage"
+    return 0
+  done
+  rm -rf -- "$stage"
+  return 1
+}
+cp "$share_dir/redact.jq" "$work/redact.jq"
+
+
+collect_git() {
+  local root authors_raw marker common seen='[]' until_git scan_message
+  authors_raw=$(routine_get identity.git_authors)
+  [[ $authors_raw != '[]' ]] || { source_error='Git author identities are missing (routine init)'; return 1; }
+  local repo author lines sha ts author_ts author_epoch subject origin name rebased repo_ok
+  local valid_repos=0 repo_errors=0
+  local -a authors
+  authors=()
+  while IFS= read -r author; do authors+=("$author"); done < <(command jq -r '.[]' <<< "$authors_raw")
+  : > "$work/git.rows"
+  until_git=$(iso_at "$((until_epoch-1))")
+  while IFS= read -r -d '' root; do
+    if ! routine_git_markers "$root" > "$work/root.markers" 2> "$work/root.stderr"; then
+      scan_message=$(cat "$work/root.stderr")
+      add_error git "${scan_message:-$root: Repository scan timed out or failed}"
+      ((repo_errors+=1))
+    fi
+    while IFS= read -r -d '' marker; do
+      repo=${marker%/.git}
+      common=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || printf '%s' "$marker")
+      if command jq -e --arg common "$common" 'index($common)!=null' <<< "$seen" >/dev/null; then continue; fi
+      seen=$(command jq -c --arg common "$common" '.+[$common]' <<< "$seen")
+      [[ -d $repo && ( -d $repo/.git || -f $repo/.git ) ]] || continue
+      name=${repo##*/}
+      origin=$(git -C "$repo" config --get remote.origin.url 2>/dev/null || true)
+      if [[ -n $origin ]]; then
+        name=${origin##*/}; name=${name##*:}; name=${name%.git}
+      fi
+      : > "$work/repo.rows"
+      repo_ok=1
+      for author in "${authors[@]}"; do
+        if ! lines=$(git -C "$repo" log --all --fixed-strings --since="$since" --until="$until_git" --author="$author" --format='%H%x09%cI%x09%aI%x09%at%x09%s' 2> "$work/git.stderr"); then
+          if grep -iq 'Operation not permitted' "$work/git.stderr"; then
+            add_error git "$name: Operation not permitted (check Documents access permissions)"
+          else
+            add_error git "$name: Could not read git history"
+          fi
+          ((repo_errors+=1)); repo_ok=0; break
+        fi
+        [[ -n $lines ]] || continue
+        while IFS=$'\t' read -r sha ts author_ts author_epoch subject; do
+          rebased=false
+          if ((author_epoch < since_epoch || author_epoch >= until_epoch)); then rebased=true; fi
+          jq -nc --arg repo "$name" --arg sha "$sha" --arg ts "$ts" --arg author_ts "$author_ts" --arg subject "$subject" --argjson rebased "$rebased" '{repo:$repo,sha:$sha,ts:$ts,author_ts:$author_ts,rebased:$rebased,subject:$subject}' >> "$work/repo.rows" || return 1
+        done <<< "$lines"
+      done
+      if ((repo_ok)); then
+        ((valid_repos+=1))
+        cat "$work/repo.rows" >> "$work/git.rows"
+      fi
+    done < "$work/root.markers"
+  done < <(command jq -j '.sources.git.roots[]|.+"\u0000"' <<< "$ROUTINE_SETTINGS")
+  jq -s 'unique_by(.sha) | sort_by(.ts)' "$work/git.rows" > "$work/git.json" || return 1
+  if ((valid_repos == 0 && repo_errors > 0)); then source_error='All git repositories failed'; return 1; fi
+}
+
+collect_prs() {
+  local role response limit login='' pr url deadline count
+  : > "$work/prs.rows"
+  command -v gh >/dev/null || { source_error='gh is unavailable'; return 1; }
+  limit=$(command -v gtimeout || command -v timeout || true)
+  [[ -n $limit ]] || { source_error='gtimeout or timeout required for PR collection'; return 1; }
+  deadline=$(($(date +%s)+120))
+  # All network calls share the stage deadline, including gh's internal pagination.
+  pr_call() {
+    local cap=$1 remaining
+    shift
+    remaining=$((deadline-$(date +%s)))
+    ((remaining>0)) || return 124
+    ((remaining>=cap)) || cap=$remaining
+    "$limit" -k 1 "$cap" "$@"
+  }
+  for role in author reviewed-by commenter; do
+    response=$(pr_call 20 gh search prs "--$role=@me" --updated=">=$since" --sort updated --json repository,number,title,state,createdAt,updatedAt,url --limit 50 2>/dev/null) || { source_error="gh search failed ($role; check authentication or deadline)"; return 1; }
+    count=$(jq -er 'select(type=="array")|length' <<< "$response") || { source_error='Invalid gh response'; return 1; }
+    if ((count>=50)); then add_error prs "PR candidate search saturated: $role (50 results)"; fi
+    jq -c --arg role "$role" '.[] | select(.url and .updatedAt) | . + {roles:[$role]}' <<< "$response" >> "$work/prs.rows" || { source_error='Invalid gh response'; return 1; }
+  done
+  jq -s --arg since "$since" --arg until "$until" '
+    map(select(.updatedAt >= $since)) | group_by(.url) |
+    map(.[0] + {roles:(map(.roles[])|unique)}) |
+    sort_by([(if .roles|index("author") then
+                if .createdAt >= $since and .createdAt < $until then 0 else 1 end
+              elif .roles|index("reviewed-by") then 2 else 3 end),
+             -(.updatedAt|fromdateiso8601)])
+  ' "$work/prs.rows" > "$work/prs.candidates.all" || return 1
+  count=$(jq 'length' "$work/prs.candidates.all")
+  if ((count>50)); then add_error prs "PR candidate limit exceeded: $count unique candidates (50 retained)"; fi
+  jq '.[:50]' "$work/prs.candidates.all" > "$work/prs.candidates"
+  if response=$(pr_call 10 gh api user 2>/dev/null) && login=$(jq -ers 'select(length==1)|.[0].login|select(type=="string" and length>0)' <<< "$response"); then :
+  else login=''; add_error prs 'gh api user failed: personal PR activity is unknown'; fi
+  : > "$work/prs.rows"
+  while IFS= read -r pr; do
+    url=$(jq -r '.url' <<< "$pr")
+    printf '%s\n' "$pr" > "$work/pr.candidate"
+    cp "$work/pr.candidate" "$work/pr.annotated"
+    if (($(date +%s)>=deadline)); then
+      add_error prs "PR collection deadline exceeded: $url"
+    elif pr_call 20 gh pr view "$url" --json state,baseRefName,title,author,createdAt,mergedAt,mergedBy,commits,reviews,comments > "$work/pr.current" 2>/dev/null &&
+         jq -es 'length==1 and (.[0]|type=="object" and (.state|IN("OPEN","CLOSED","MERGED")))' "$work/pr.current" >/dev/null; then
+      if jq -c --slurpfile current "$work/pr.current" '. + {current:($current[0]|{state,baseRefName,title,mergedAt})}' "$work/pr.candidate" > "$work/pr.annotated" &&
+         [[ -n $login ]] &&
+         jq -L "$share_dir" -c --arg login "$login" --arg since "$since" --arg until "$until" 'include "scrum"; pr_activity($login;$since;$until)' "$work/pr.current" > "$work/pr.activity" 2>/dev/null &&
+         jq -c --slurpfile activity "$work/pr.activity" '. + {activity:$activity[0],in_window:any($activity[0][];.kind!="merged_by_other")}' "$work/pr.annotated" > "$work/pr.row"; then
+        cat "$work/pr.row" >> "$work/prs.rows"
+        continue
+      fi
+      [[ -z $login ]] || add_error prs "PR activity unavailable or incomplete: $url"
+    else
+      add_error prs "gh pr view failed: $url"
+    fi
+    if [[ ! -s $work/pr.annotated ]]; then cp "$work/pr.candidate" "$work/pr.annotated"; fi
+    jq -c '. + {in_window:"unknown",activity:[]}' "$work/pr.annotated" >> "$work/prs.rows" || return 1
+  done < <(jq -c '.[]' "$work/prs.candidates")
+  jq -s 'sort_by(.updatedAt)' "$work/prs.rows" > "$work/prs.json"
+}
+
+collect_sessions() {
+  local engine=${1:-omp} base session_source=sessions file changed header second identity
+  base=$(routine_get sources.omp_sessions.dir)
+  if [[ $engine == claude ]]; then base=$(routine_get sources.claude_sessions.dir); session_source=claude_sessions; fi
+  : > "$work/sessions.rows"; : > "$work/sessions.manifest"
+  [[ -d $base ]] || { source_error="$engine sessions directory does not exist"; return 1; }
+  for file in "$base"/*/*.jsonl; do
+    [[ -f $file ]] || continue
+    changed=$(stat -f %m "$file") || { add_error "$session_source" "${file##*/}: Cannot stat session"; continue; }
+    ((changed >= since_epoch)) || continue
+    exec 3< "$file" || { add_error "$session_source" "${file##*/}: Cannot open session"; continue; }
+    IFS= read -r header <&3 || [[ -n $header ]] || { exec 3<&-; continue; }
+    IFS= read -r second <&3 || true
+    exec 3<&-
+    identity=$(jq -nr --arg first "$header" --arg second "$second" '($first | fromjson? // {}) as $a | ($second | fromjson? // {}) as $b | $a.id // $b.id // $a.sessionId // $b.sessionId // empty') || { add_error "$session_source" "${file##*/}: Invalid session header"; continue; }
+    if [[ -z $identity ]]; then
+      identity=$(dd if="$file" bs=4096 count=1 2>/dev/null | shasum -a 256 | cut -d ' ' -f 1) || { add_error "$session_source" "${file##*/}: Cannot hash session"; continue; }
+    fi
+    jq -nc --arg id "$identity" --arg path "$file" --argjson mtime "$changed" '{id:$id,path:$path,mtime:$mtime}' >> "$work/sessions.manifest"
+  done
+  jq -sr 'group_by(.id) | map(max_by(.mtime)) | .[].path' "$work/sessions.manifest" > "$work/sessions.latest" || return 1
+  while IFS= read -r file; do
+    if ! jq -cR --arg source "$engine" '
+      fromjson? // empty | select(.isSidechain != true and ($source!="claude" or .isMeta!=true)) |
+      if .type == "title" then {type,title}
+      elif .type == "session" then {type,id,cwd,title,timestamp}
+      elif (.type == "message" or .type == "user" or .type == "assistant") and (.message.role == "user" or .message.role == "assistant") then
+        {type:"message",cwd,timestamp,message:{role:.message.role,attribution:.message.attribution,content:(if (.message.content|type)=="string" then .message.content else [.message.content[]?|select(.type=="text")|.text]|join(" ") end)}} |
+        select(.message.content|test("[^[:space:]]")) |
+        select($source!="claude" or (.message.content|test("^[[:space:]]*(<(command-|local-command-)|\\[Request interrupted)")|not))
+      elif (.timestamp?|type=="string") then {type:"time",timestamp}
+      else empty end
+    ' "$file" > "$work/session.filtered"; then
+      add_error "$session_source" "${file##*/}: Cannot read session"
+      continue
+    fi
+    if ! jq -L "$work" -nc --arg source "$engine" --arg id "$(jq -sr --arg file "$file" '.[] | select(.path==$file) | .id' "$work/sessions.manifest")" --argjson since "$since_epoch" --argjson until "$until_epoch" --slurpfile records "$work/session.filtered" '
+      include "redact";
+      def epoch: try (sub("\\.[0-9]+"; "") | fromdateiso8601) catch null;
+      $records as $r |
+      ($r | [ .[] | select(.type == "message" and .message.role == "user" and .message.attribution != "agent" and (.timestamp? | type == "string")) |
+        {ts:.timestamp, text:(.message.content | redact | .[:300])} |
+        select((.ts | epoch) as $t | $t != null and $t >= $since and $t < $until) |
+        select(.text | test("^[[:space:]]*<system"; "i") | not) ] | sort_by(.ts) |
+        if $source=="claude" and length>20 then .[:1]+.[-19:] else . end) as $msgs |
+      ($r | [.[] | select(.type == "message" and .message.role == "assistant" and (.timestamp? | type == "string")) |
+        select((.timestamp | epoch) as $t | $t != null and $t >= $since and $t < $until) |
+        select(.message.content | length > 0)] | sort_by(.timestamp) | to_entries) as $assistant |
+      (($assistant | map(select(.value.message.content | test("(^|\n)[ \t]*(#+[ \t]+[^\n]*)?✅|확인[[:space:]]*결과|정상|이상[[:space:]]*없|완료했습니다"))) | .[-6:]) + $assistant[-4:] |
+        unique_by(.key) | sort_by(.key) | map({ts:.value.timestamp,text:(.value.message.content | redact)})) as $reports |
+      # Preserve selected results and recent context within a shared character budget.
+      ($reports | to_entries | sort_by(.value.text | length) |
+        reduce .[] as $report ({remaining:6000,count:($reports|length),rows:[]};
+          ([1000,(.remaining/.count|floor)]|min) as $limit |
+          ($report.value | .text |= .[:$limit]) as $value |
+          .remaining -= ($value.text|length) | .count -= 1 |
+          .rows += [{key:$report.key,value:$value}]) |
+        .rows | sort_by(.key) | map(.value)) as $bounded_reports |
+      select(($msgs | length > 0) or ($reports | length > 0)) |
+      ((if $source=="claude" then "claude-session:" else "session:" end)+$id) as $evidence_id |
+      {id:$id,source:$source,evidence_id:$evidence_id,
+       title: (if $source=="claude" then $msgs[0].text // ($assistant[0].value.message.content // "(untitled)"|.[:300]) else [$r[]|select(.type=="title" and (.title|type=="string" and length>0))|.title][0] // [$r[]|select(.type=="session" and (.title|type=="string" and length>0))|.title][0] // $msgs[0].text // "(untitled)" end),
+       cwd: ([$r[] | select(.cwd != null) | .cwd][0] // ""),
+       first_ts: ([$r[] | select(.timestamp? and (.timestamp | type == "string")) | .timestamp] | min // null),
+       last_ts: ([$r[] | select(.timestamp? and (.timestamp | type == "string")) | .timestamp] | max // null),
+       latest_report: ($reports[-1].text // null | if . == null then null else .[:(if $source=="claude" then 1000 else 1500 end)] end),
+       reports:($bounded_reports|to_entries|map(.value+{evidence_id:($evidence_id+"#"+(.key|tostring))})),
+       user_messages:$msgs}
+    ' >> "$work/sessions.rows"; then
+      add_error "$session_source" "${file##*/}: Invalid session records"
+    fi
+  done < "$work/sessions.latest"
+  jq -s 'sort_by(.user_messages[0].ts // .last_ts // "")' "$work/sessions.rows" > "$work/$session_source.json"
+}
+collect_claude_sessions() { collect_sessions claude; }
+
+collect_jira() {
+  local base history copy profile attempt ready found=0 succeeded=0
+  base=$(routine_get sources.jira.chrome_dir)
+  : > "$work/jira.rows"
+  [[ -d $base ]] || { source_error='Chrome directory does not exist'; return 1; }
+  for history in "$base"/*/History; do
+    [[ -f $history ]] || continue
+    ((found+=1))
+    profile=${history%/History}; profile=${profile##*/}
+    copy=$(mktemp -d "$work/chrome.XXXXXXXX") || { add_error jira "$profile: Cannot prepare Chrome History snapshot"; continue; }
+    ready=0
+    # One initial attempt followed by at most three retries.
+    for attempt in 0 1 2 3; do
+      if snapshot_sqlite "$history" "$copy/History"; then ready=1; break; fi
+      rm -f -- "$copy/History" "$copy/History-wal" "$copy/History-shm" "$copy/History-journal"
+      ((attempt==3)) || sleep 2
+    done
+    if ((!ready)); then
+      add_error jira "$profile: Cannot snapshot Chrome History (locked, busy past timeout, or corrupt copy)"
+      rm -rf -- "$copy"
+      continue
+    fi
+    if ! sqlite3 -json "file:$copy/History?mode=ro" "SELECT (visits.visit_time/1000000-11644473600) AS epoch, urls.title AS title, urls.url AS url FROM visits JOIN urls ON visits.url=urls.id WHERE visits.visit_time >= ($since_epoch+11644473600)*1000000 AND visits.visit_time < ($until_epoch+11644473600)*1000000 AND urls.url LIKE '%atlassian.net%';" > "$copy/visits.json" 2>/dev/null ||
+       { [[ -s $copy/visits.json ]] && ! jq -e 'type=="array"' "$copy/visits.json" >/dev/null 2>&1; }; then
+      add_error jira "$profile: Invalid Chrome History schema or visits"
+      rm -rf -- "$copy"
+      continue
+    fi
+    cat "$copy/visits.json" >> "$work/jira.rows"
+    ((succeeded+=1))
+    printf '\n' >> "$work/jira.rows"
+    rm -rf -- "$copy"
+  done
+  if ((found>0 && succeeded==0)); then source_error='No Chrome History profile could be read'; return 1; fi
+  jq -s --argjson since "$since_epoch" --argjson until "$until_epoch" '
+    [.[][] | select(.epoch >= $since and .epoch < $until) |
+      select(.url | test("/wiki(?:/|[?#]|$)") | not) | . as $visit |
+      (($visit.url | try capture("/browse/(?<key>[A-Z]+-[0-9]+)").key catch null) //
+       ($visit.url | try capture("[?&]selectedIssue=(?<key>[A-Z]+-[0-9]+)").key catch null) //
+       ($visit.title // "" | try match("[A-Z]+-[0-9]+").string catch null)) as $key |
+      select($key != null) |
+      {ts:($visit.epoch | todateiso8601), key:$key, title:($visit.title // ""),
+       url:($visit.url | split("?")[0] | split("#")[0]), epoch:$visit.epoch}] |
+    group_by(.key) | map(max_by(.epoch) | del(.epoch)) | sort_by(.ts)
+  ' "$work/jira.rows" > "$work/jira.json" || { source_error='Could not parse Chrome visits'; return 1; }
+}
+
+collect_notion() {
+  local db copy email safe_email
+  db=$(routine_get sources.notion.db); email=$(routine_get identity.notion_email_like)
+  [[ -n $email ]] || { source_error='Notion identity filter is missing (routine init)'; return 1; }
+  [[ -f $db ]] || { source_error='Notion database does not exist'; return 1; }
+  copy=$(mktemp -d "$work/notion.XXXXXXXX")
+  snapshot_sqlite "$db" "$copy/notion.db" || { source_error='Cannot snapshot Notion database (locked, busy past timeout, or corrupt copy)'; return 1; }
+  safe_email=${email//\'/\'\'}
+  sqlite3 -json "file:$copy/notion.db?mode=ro" "WITH RECURSIVE mine AS (SELECT DISTINCT id FROM notion_user WHERE email LIKE '$safe_email'), edited AS (SELECT id, parent_id, type, properties, last_edited_time FROM block WHERE last_edited_by_id IN (SELECT id FROM mine) AND last_edited_time >= $((since_epoch * 1000)) AND last_edited_time < $((until_epoch * 1000))), ancestors(edit_id, page_id, parent_id, depth) AS (SELECT e.id, b.id, b.parent_id, 0 FROM edited e JOIN block b ON b.id=e.id UNION ALL SELECT a.edit_id, b.id, b.parent_id, a.depth+1 FROM ancestors a JOIN block b ON b.id=a.parent_id WHERE a.depth < 30 AND a.page_id != a.parent_id), pages AS (SELECT a.edit_id, a.page_id, a.depth, b.properties FROM ancestors a JOIN block b ON b.id=a.page_id WHERE b.type='page'), nearest AS (SELECT p.* FROM pages p WHERE p.depth=(SELECT MIN(depth) FROM pages WHERE edit_id=p.edit_id)) SELECT datetime(MAX(e.last_edited_time)/1000, 'unixepoch') AS last_edited_ts, COUNT(DISTINCT e.id) AS count, COALESCE(json_extract(p.properties,'$.title[0][0]'), '(제목 없음)') AS page_title FROM edited e JOIN nearest p ON p.edit_id=e.id GROUP BY p.page_id ORDER BY MAX(e.last_edited_time);" > "$work/notion.json" 2>/dev/null || { source_error='Invalid Notion database schema'; return 1; }
+  [[ -s $work/notion.json ]] || printf '[]\n' > "$work/notion.json"
+  jq 'map(.last_edited_ts |= (gsub(" "; "T") + "Z"))' "$work/notion.json" > "$work/notion.normalized" || { source_error='Invalid Notion data'; return 1; }
+  mv "$work/notion.normalized" "$work/notion.json"
+}
+
+poll_slack_target() {
+  local filter=$1 attempt value
+  shift
+  for attempt in 1 2 3 4 5; do
+    if "$orca" computer get-app-state --app com.tinyspeck.slackmacgap --no-screenshot --json > "$work/slack.state" &&
+       value=$(jq -L "$share_dir" -er "$@" "$filter" "$work/slack.state" 2> "$work/slack-poll.error"); then
+      printf '%s\n' "$value"
+      return 0
+    fi
+    ((attempt == 5)) || sleep 1
+  done
+  [[ ! -f $work/slack-poll.error ]] || cat "$work/slack-poll.error" >&2
+  return 1
+}
+
+collect_slack() {
+  [[ ${ROUTINE_ALLOW_GUI:-0} == 1 ]] || { source_error='GUI source skipped'; return 1; }
+  local orca search_index combo_index query suggestion focused restore_status invalid_timestamps
+  # Prefer an explicit PATH selection (also permits isolated test stubs), but skip
+  # entries that cannot run (e.g. a root-only /usr/local/bin/orca symlink).
+  orca=$(find_orca) || { source_error='Orca is unavailable'; return 1; }
+  ensure_orca_runtime "$orca" || { source_error='Orca runtime did not start'; return 1; }
+  source_error='Slack search failed'
+  auto_input_guard || return $?
+  open -a Slack || return 1
+  auto_gui_activity || return 1
+  search_index=$(poll_slack_target 'include "slack"; tree_text | ax_index(slack_labels.search)') || { slack_format_notice '검색/검색 버튼'; return 1; }
+  auto_input_guard || return $?
+  "$orca" computer click --app com.tinyspeck.slackmacgap --element-index "$search_index" --no-screenshot --json >/dev/null || return 1
+  auto_gui_activity || return 1
+  combo_index=$(poll_slack_target 'include "slack"; tree_text | ax_index(slack_labels.combo)') || { slack_format_notice '검색/콤보 상자'; return 1; }
+  query="from:me after:$(date -r "$((since_epoch - 86400))" '+%Y-%m-%d')"
+  auto_input_guard || return $?
+  "$orca" computer set-value --app com.tinyspeck.slackmacgap --element-index "$combo_index" --value "$query" --no-screenshot --json >/dev/null || return 1
+  auto_gui_activity || return 1
+  # shellcheck disable=SC2016 # jq filter; $query is a jq variable
+  if suggestion=$(poll_slack_target 'include "slack"; tree_text | ax_lines | [.[] | select(.body == ("메뉴 항목, Value: " + $query + " 검색")) | .index] | select(length==1) | .[0]' --arg query "$query"); then :
+  else
+    suggestion=$(jq -L "$share_dir" -r --arg query "$query" 'include "slack"; tree_text | ax_lines | [.[] | select(.body == ("메뉴 항목, Value: " + $query + " 검색")) | .index] | if length == 1 then .[0] elif length == 0 then empty else error("Ambiguous search suggestion") end' "$work/slack.state") || return 1
+  fi
+  if [[ -n $suggestion ]]; then
+    auto_input_guard || return $?
+    "$orca" computer click --app com.tinyspeck.slackmacgap --element-index "$suggestion" --no-screenshot --json >/dev/null || return 1
+    auto_gui_activity || return 1
+  else
+    # Return can only confirm a freshly observed, focused search combo box.
+    combo_index=$(jq -L "$share_dir" -er 'include "slack"; tree_text | ax_index(slack_labels.combo)' "$work/slack.state") || return 1
+    focused=$(jq -r '.result.snapshot.focusedElementId // .snapshot.focusedElementId // empty' "$work/slack.state") || return 1
+    [[ $focused == "$combo_index" ]] || { source_error='Slack search focus could not be verified'; return 1; }
+    auto_input_guard || return $?
+    "$orca" computer press-key --app com.tinyspeck.slackmacgap --key Return --no-screenshot --json >/dev/null || return 1
+    auto_gui_activity || return 1
+  fi
+  sleep 4
+  "$orca" computer get-app-state --app com.tinyspeck.slackmacgap --no-screenshot --json > "$work/slack.state" || return 1
+  jq -L "$share_dir" 'include "slack"; tree_text | search_results | map(. + {epoch:((try (.url|capture("/p(?<ts>[0-9]{10})[0-9]{6}(?:[?]|$)").ts|tonumber) catch null) // null)})' "$work/slack.state" > "$work/slack.rows.json" || return 1
+  invalid_timestamps=$(jq '[.[]|select(.epoch==null)]|length' "$work/slack.rows.json")
+  if ((invalid_timestamps>0)); then add_error slack "Slack URL timestamp could not be parsed ($invalid_timestamps messages; check screen/URL format)"; fi
+  jq -L "$share_dir" --argjson since "$since_epoch" --argjson until "$until_epoch" 'include "redact"; map(select(.epoch!=null and .epoch >= $since and .epoch < $until) | del(.epoch) | .text |= redact | .url |= redact_url)' "$work/slack.rows.json" > "$work/slack.json" || return 1
+  # Restore immediately after Slack reads, before scrum-draft starts its model.
+  if restore_previous_app; then :
+  else
+    restore_status=$?
+    if [[ $restore_status != 4 && -n ${ROUTINE_GUI_ACTIVITY_FILE:-} ]]; then
+      printf 'Slack 수집 후 전면 복원 확인 실패\n' > "$ROUTINE_GUI_ACTIVITY_FILE.focus-warning"
+    fi
+    return "$restore_status"
+  fi
+}
+
+selected=0 failed=0 slack_success=false
+collect_progress() {
+  [[ ${ROUTINE_COLLECT_PROGRESS:-0} == 1 ]] || return 0
+  printf 'COLLECT %s %s %s %s\n' "$(date '+%FT%T%z')" "$1" "$source" "${2:-}" >&2
+}
+IFS=',' read -r -a requested <<< "$sources"
+for source in "${requested[@]}"; do
+  case $source in git|prs|sessions|claude_sessions|jira|notion|slack) ;; *) printf 'Invalid source: %s\n' "$source" >&2; exit 2 ;; esac
+  ((selected+=1))
+  source_error="Could not collect $source"
+  source_progress_status=ok
+  collect_progress START
+  if "collect_$source"; then
+    if [[ $source == slack ]]; then slack_success=true; fi
+  else
+    source_status=$?
+    source_progress_status=fail
+    # Do not continue to model generation after an unattended input interruption.
+    if [[ $source == slack && $source_status == 4 ]]; then collect_progress END fail; exit 4; fi
+    ((failed+=1))
+    add_error "$source" "$source_error"
+    printf '[]\n' > "$work/$source.json"
+  fi
+  collect_progress END "$source_progress_status"
+done
+((selected > 0)) || { echo 'No sources selected' >&2; exit 2; }
+if [[ -f $work/errors.rows ]]; then jq -s '.' "$work/errors.rows" > "$work/errors.json"; fi
+jq -n --arg since "$since" --arg until "$until" --arg tz "$TZ" --arg generated_at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --argjson slack_success "$slack_success" \
+  --slurpfile git "$work/git.json" --slurpfile prs "$work/prs.json" --slurpfile sessions "$work/sessions.json" --slurpfile claude "$work/claude_sessions.json" --slurpfile jira "$work/jira.json" --slurpfile notion "$work/notion.json" --slurpfile slack "$work/slack.json" --slurpfile errors "$work/errors.json" \
+  '{version:1,window:{since:$since,until:$until,tz:$tz},generated_at:$generated_at,sources:{slack:$slack_success},git:$git[0],prs:$prs[0],sessions:($sessions[0]+$claude[0]),jira:$jira[0],notion:$notion[0],slack:$slack[0],errors:$errors[0]}' > "$work/result.raw.json"
+jq -L "$work" '
+  include "redact";
+  .git |= map(.repo |= redact | .subject |= redact) |
+  .prs |= map(walk(if type=="string" then redact else . end) | .url |= redact_url) |
+  .sessions |= map(.title |= redact | .cwd |= redact | .user_messages |= map(.text |= redact)) |
+  .jira |= map(.title |= redact | .url |= redact_url) |
+  .notion |= map(.page_title |= redact) |
+  .slack |= map(.text |= redact | .url |= redact_url) |
+  .errors |= map(.message |= redact)
+' "$work/result.raw.json" > "$work/result.json"
+jq -r '
+  def clean: tostring | gsub("[\\r\\n]"; " ");
+  "# 모닝 스크럼 자료 (\(.window.since) ~ \(.window.until))", "",
+  "## Git", (.git[] | "- \(.ts) \(.repo | clean): \(.subject | clean) (\(.sha[:8]))"), "",
+  "## PR: 기간 내 내 활동 / 현재 상태", (.prs[] | "- in_window=\(.in_window) 활동=\(.activity|map(.kind+":"+.at)|join(", ")) 현재=\(.current.state // .state) \(.title | clean) (#\(.number), \(.roles | join(", "))) \(.url | split("?")[0] | split("#")[0])"), "",
+  "## 세션", (.sessions[] | "- \(.user_messages[0].ts // .last_ts // "") \(.title | clean) — \(.user_messages[:3] | map(.text | clean) | join("; "))"), "",
+  "## Jira", (.jira[] | "- \(.ts) \(.key) \(.title | clean)"), "",
+  "## Notion", (.notion[] | "- \(.last_edited_ts) \(.page_title | clean) (\(.count)건)"), "",
+  "## Slack", (.slack[] | "- \(.ts_text) \(.channel | clean): \(.text | clean) \(.url)"), "",
+  "## 수집 오류", (.errors[] | "- \(.source): \(.message | clean)")
+' "$work/result.json" > "$work/result.md"
+cp "$work/result.json" "$out/$until_date.json"
+cp "$work/result.md" "$out/$until_date.md"
+chmod 600 "$out/$until_date.json" "$out/$until_date.md"
+if ((failed == selected)); then exit 1; fi

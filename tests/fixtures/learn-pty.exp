@@ -1,0 +1,36 @@
+#!/usr/bin/expect -f
+set timeout 120
+set routine [lindex $argv 0]
+set transcript [lindex $argv 1]
+set mode [lindex $argv 2]
+set expected [lindex $argv 3]
+set args [lrange $argv 4 end]
+spawn /usr/bin/script -q $transcript /bin/bash $routine {*}$args
+set choices 0
+while {1} {
+  expect {
+    -re {클립보드에서 보낸 스크럼 글을 읽을까요\? \[y/N\] } {
+      if {$mode eq "decline"} { send -- "n\r" } else { send -- "y\r" }
+      exp_continue
+    }
+    -re {본인이 보낸 글인지 확인했나요\?.*비교할까요\? \[y/N\] } {
+      if {$mode eq "preview-decline"} { send -- "n\r" } else { send -- "y\r" }
+      exp_continue
+    }
+    -re {번호로 선택/해제, Enter로 확정\): } {
+      incr choices
+      if {$choices==1 && $mode ne "empty"} {
+        if {$mode eq "reverse"} { send -- "3 1\r" } else { send -- "1 3\r" }
+      } else { send -- "\r" }
+      exp_continue
+    }
+    -re {LEARN_RC=([0-9]+)} {
+      if {$expect_out(1,string)!=$expected} { puts stderr "학습 PTY 종료 코드: $expect_out(1,string)"; exit 1 }
+      expect eof
+      wait
+      exit 0
+    }
+    eof { puts stderr "학습 PTY 종료 코드 누락"; exit 1 }
+    timeout { puts stderr "학습 PTY 대기 초과: $mode"; exit 1 }
+  }
+}

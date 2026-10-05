@@ -1,0 +1,429 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+script_dir=$(CDPATH='' cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd)
+if [[ -L ${BASH_SOURCE[0]} ]]; then script_dir=$(CDPATH='' cd -P -- "$(dirname -- "$(readlink "${BASH_SOURCE[0]}")")" >/dev/null && pwd); fi
+share_dir="$script_dir/../share"
+# shellcheck source=../share/config.sh
+source "$share_dir/config.sh"
+routine_load_config
+# Use the existing once-per-phase cleanup notification for layout failures.
+export ROUTINE_SLACK_FORMAT_DEFERRED=1
+window_start=$(routine_get delivery.window.start); window_start=${window_start/:/}
+window_end=$(routine_get delivery.window.end); window_end=${window_end/:/}
+no_post_after=$(routine_get delivery.no_post_after); no_post_after=${no_post_after/:/}
+idle_seconds=$(routine_get delivery.idle_seconds)
+daily_attempts=$(routine_get delivery.daily_attempts)
+usage() { echo 'Usage: scrum-paste [--auto] [--no-draft] [--force] [--replace] [--dry-run]'; }
+no_draft=0 force=0 replace=0 dry_run=0 auto=0
+while (($#)); do
+  case $1 in
+    --auto) auto=1 ;; --no-draft) no_draft=1 ;; --force) force=1 ;; --replace) replace=1 ;; --dry-run) dry_run=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "알 수 없는 옵션: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+if ((auto && (force || replace))); then echo '--auto는 --force/--replace와 함께 사용할 수 없습니다.' >&2; exit 2; fi
+if ((auto)) && [[ $(routine_get delivery.mode) != gui-paste ]]; then
+  echo 'clipboard 전달: 자동 붙여넣기 없음'
+  exit 0
+fi
+out="$HOME/Library/Application Support/routine-automation/scrum"
+now=$(date +%s)
+if [[ -n ${ROUTINE_NOW:-} ]]; then
+  stamp=${ROUTINE_NOW/Z/+0000}
+  stamp=$(printf '%s' "$stamp" | sed -E 's/([+-][0-9]{2}):([0-9]{2})$/\1\2/')
+  now=$(date -j -f '%Y-%m-%dT%H:%M:%S%z' "$stamp" '+%s')
+fi
+day=$(date -r "$now" '+%Y-%m-%d')
+if ((dry_run)); then
+  [[ -f $out/$day.draft.txt ]] || { echo '기존 초안이 없습니다. 먼저 scrum-draft를 실행하세요.' >&2; exit 1; }
+  cat "$out/$day.draft.txt"
+  printf '\n계획: 설정된 스크럼 글 → 스레드 → 빈 댓글 입력창 → HTML 붙여넣기 → 스크린샷 → 클립보드 복원. 전송하지 않습니다.\n'
+  exit 0
+fi
+# Bound the complete LaunchAgent execution, including GUI calls and cleanup.
+if ((auto)) && [[ ${ROUTINE_AUTO_TIMEOUT_ACTIVE:-0} != 1 ]]; then
+  limit=$(command -v gtimeout || command -v timeout || true)
+  [[ -n $limit ]] || { echo 'gtimeout or timeout required for --auto' >&2; exit 2; }
+  args=(--auto)
+  ((!no_draft)) || args+=(--no-draft)
+  exec env ROUTINE_AUTO_TIMEOUT_ACTIVE=1 "$limit" -k 30 900 /bin/bash "$script_dir/scrum-paste" "${args[@]}"
+fi
+# shellcheck source=../share/gui-guard.sh
+source "$share_dir/gui-guard.sh"
+log_dir="$HOME/Library/Logs/routine-automation"
+lock="$out/.scrum-paste.lock"
+work='' clipboard_saved=0 lock_owned=0 log_active=0 paste_attempted=0 paste_completed=0
+phase='실행 준비' phase_id=prepare terminal_reason='' terminal_kind=skipped
+failure_reason='' screenshot='' original_app='' attempts=0
+has_marker() { [[ -e $out/$day.pasted || -e $out/$day.paste-skipped || -e $out/$day.paste-attention ]]; }
+notify_once() {
+  local key=$1 message=$2 marker="$out/$day.paste-notified-$1"
+  [[ ! -e $marker ]] || return 0
+  mkdir -p "$out"
+  if ! (set -o noclobber; printf '%s %s\n' "$(date '+%FT%T%z')" "$key" > "$marker") 2>/dev/null; then return 0; fi
+  message+="$(routine_draft_omission_notice "$out/$day.draft.json")"
+  if command -v osascript >/dev/null; then
+    osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "스크럼 붙여넣기"' -e 'end run' "$message" || true
+  fi
+}
+cleanup() {
+  local status=$? restore_failed=0 saved_reason front
+  trap - EXIT HUP INT TERM
+  if ((clipboard_saved)); then
+    if ! osascript -l JavaScript "$share_dir/clipboard.js" restore "$work/clipboard.json"; then
+      printf '클립보드 복원 실패: 백업 보존 %s\n' "$work/clipboard.json" >&2
+      status=1; restore_failed=1; failure_reason='클립보드 복원 실패'; phase_id=restore
+    fi
+  fi
+  if ((auto)) && [[ -n $original_app && -e $ROUTINE_GUI_ACTIVITY_FILE.started ]]; then
+    saved_reason=$failure_reason
+    restore_previous_app || true
+    failure_reason=$saved_reason
+    front=$(osascript -l JavaScript "$share_dir/app-focus.js" capture) || front=''
+    if [[ $front == com.tinyspeck.slackmacgap ]]; then
+      notify_once foreground 'Slack이 전면에 남음 — 키 입력 주의'
+    elif [[ -z $front ]]; then
+      notify_once foreground '전면 앱 복원 결과를 확인하지 못함 — 키 입력 주의'
+    fi
+  fi
+  if ((auto && status == 3)) && [[ -z $terminal_reason ]]; then status=1; fi
+  if ((auto && status == 4)); then
+    failure_reason=${failure_reason:-사용자 입력/잠금 감지}
+    phase_id=input
+    # A user taking over defers the attempt, rather than exhausting GUI failures.
+    if ((attempts > 0)); then ((attempts-=1)) || true; printf '%s\n' "$attempts" > "$out/$day.paste-attempts"; fi
+  fi
+  if ((status != 0 && paste_attempted)); then
+    terminal_kind=attention
+    terminal_reason="붙여넣기 됐을 수 있음 — ${failure_reason:-$phase 실패}. 체크박스/스레드 확인, 전송 금지"
+    printf '%s\nreason=%s\n' "$(date '+%FT%T%z')" "$terminal_reason" > "$out/$day.paste-attention"
+    if ((auto)); then status=3; fi
+  elif ((auto && status != 0 && status != 3 && status != 4 && attempts >= daily_attempts)); then
+    terminal_reason="일일 GUI 시도 ${daily_attempts}회 소진 — ${failure_reason:-$phase 실패}. 터미널에서 routine paste"
+    status=3
+  fi
+  if ((status == 0 && paste_completed)); then
+    printf '%s\nscreenshot=%s\n' "$(date '+%FT%T%z')" "$screenshot" > "$out/$day.pasted"
+    if ((auto)); then notify_once success '스크럼 초안을 스레드 입력창에 넣었습니다. 확인 후 전송하세요'; fi
+  elif ((auto && status != 0)); then
+    case $status in
+      3)
+        printf '%s\nreason=%s\n' "$(date '+%FT%T%z')" "$terminal_reason" > "$out/$day.paste-$terminal_kind"
+        notify_once "$terminal_kind" "자동 붙여넣기 중단 — $terminal_reason" ;;
+      *) notify_once "$phase_id" "스크럼 자동 붙여넣기 실패 — ${failure_reason:-$phase 실패}. 다음 주기에 재시도합니다" ;;
+    esac
+  fi
+  if ((status!=0)); then printf '스크럼 붙여넣기 중단 (%s). 전송하지 않았습니다. %s\n' "$phase" "${terminal_reason:-${failure_reason:-상태를 확인한 뒤 다시 실행하세요}}" >&2; fi
+  if [[ -n $work ]] && ((!restore_failed)); then rm -rf -- "$work"; fi
+  if ((lock_owned)); then rm -f -- "$lock/pid"; rmdir "$lock"; fi
+  exit "$status"
+}
+skip_auto() {
+  if ((log_active)); then printf '%s skip: %s\n' "$(date '+%FT%T%z')" "$1"; fi
+  exit 0
+}
+lock_live() {
+  local owner modified age
+  [[ -d $1 ]] || return 1
+  owner=$(cat "$1/pid" 2>/dev/null || true)
+  modified=$(stat -f %m "$1" 2>/dev/null || date +%s)
+  age=$(($(date +%s) - modified))
+  if [[ $owner =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null && ((age < 4200)); then return 0; fi
+  [[ -z $owner ]] && ((age < 10))
+}
+retain_recent_state() {
+  local cutoff file name file_day suffix
+  cutoff=$(date -r "$((now - 7 * 86400))" '+%Y-%m-%d')
+  for file in "$log_dir"/scrum-paste-????-??-??.log; do
+    [[ -f $file ]] || continue
+    name=${file##*/}; file_day=${name#scrum-paste-}; file_day=${file_day%.log}
+    [[ $file_day < $cutoff ]] && rm -f -- "$file"
+  done
+  for file in "$out"/????-??-??.*; do
+    [[ -f $file ]] || continue
+    name=${file##*/}; file_day=${name:0:10}; suffix=${name:11}
+    case $suffix in pasted|paste-skipped|paste-attention|paste-attempts|paste-notified-*|draft-refresh-attempted) ;; *) continue ;; esac
+    [[ $file_day < $cutoff ]] && rm -f -- "$file"
+  done
+  return 0
+}
+terminal() {
+  terminal_reason=$1
+  echo "$terminal_reason" >&2
+  if ((auto)); then exit 3; else exit 1; fi
+}
+fail() { failure_reason=$1; echo "$failure_reason" >&2; exit 1; }
+if ((auto)); then
+  retain_recent_state
+  weekday=$(date -r "$now" '+%u')
+  clock=$(date -r "$now" '+%H%M')
+  [[ ! -e "$HOME/Library/Application Support/routine-automation/autopaste.disabled" ]] || skip_auto '자동 붙여넣기 비활성화'
+  jq -e --argjson day "$weekday" '.morning.weekdays|index($day)!=null' <<< "$ROUTINE_SETTINGS" >/dev/null || skip_auto '예약 요일 아님'
+  has_marker && skip_auto '오늘 완료 또는 종결 표지'
+  if ((10#$clock > 10#$window_end)); then
+    notify_once deadline '자동 붙여넣기 실패 — routine paste 실행' >/dev/null 2>&1
+    skip_auto "$(routine_get delivery.window.end) 마지막 기회 종료"
+  fi
+  ((10#$clock >= 10#$window_start)) || skip_auto "$(routine_get delivery.window.start) 이전"
+  mkdir -p "$log_dir"
+  chmod 700 "$log_dir"
+  exec >> "$log_dir/scrum-paste-$day.log" 2>&1
+  log_active=1
+  [[ -f $out/$day.draft.html && -f $out/$day.draft.txt ]] || skip_auto '오늘 초안 없음'
+  morning_lock="$log_dir/.morning.lock"
+  if lock_live "$morning_lock" && [[ $(cat "$morning_lock/stage" 2>/dev/null || true) != paste-done ]]; then
+    owner=$(cat "$morning_lock/pid" 2>/dev/null || true)
+    [[ -n ${ROUTINE_MORNING_LOCK_PID:-} && $owner == "$ROUTINE_MORNING_LOCK_PID" ]] || skip_auto 'morning 실행 중'
+  fi
+  console_unlocked || skip_auto '화면 잠김 또는 현재 사용자 콘솔 세션 아님'
+  idle=$(hid_idle_ns) || skip_auto 'HID idle 확인 불가'
+  ((idle >= idle_seconds * 1000000000)) || skip_auto "사용자 입력 중 (idle ${idle_seconds}초 미만)"
+  if ! mkdir "$lock" 2>/dev/null; then
+    lock_live "$lock" && skip_auto 'scrum-paste 실행 중'
+    recovery="$out/.scrum-paste.recovery.lock"
+    if ! mkdir "$recovery" 2>/dev/null; then
+      modified=$(stat -f %m "$recovery" 2>/dev/null || date +%s)
+      (($(date +%s) - modified >= 60)) || skip_auto '잠금 회수 중'
+      rm -rf -- "$recovery"
+      mkdir "$recovery" 2>/dev/null || skip_auto '잠금 회수 중'
+    fi
+    rm -rf -- "$lock"
+    if ! mkdir "$lock" 2>/dev/null; then rmdir "$recovery"; skip_auto 'scrum-paste 실행 중'; fi
+    rmdir "$recovery"
+    echo 'scrum-paste: recovered stale lock'
+  fi
+  lock_owned=1
+  printf '%s\n' "$$" > "$lock/pid"
+  if has_marker; then
+    rm -f -- "$lock/pid"; rmdir "$lock"; lock_owned=0
+    skip_auto '오늘 완료 또는 종결 표지'
+  fi
+else
+  unset ROUTINE_GUI_ACTIVITY_FILE ROUTINE_ORIGINAL_APP ROUTINE_FOCUS_HELPER ROUTINE_DRAFT_REFRESH_MARKER
+fi
+[[ -t 0 || $auto == 1 || ${ROUTINE_ALLOW_GUI:-0} == 1 ]] || { echo 'scrum-paste는 대화형 실행 전용입니다.' >&2; exit 2; }
+export ROUTINE_ALLOW_GUI=1
+work=$(mktemp -d "${TMPDIR:-/tmp}/scrum-paste.XXXXXXXX")
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+if ((auto)); then
+  command -v perl >/dev/null || { echo '필요한 명령이 없습니다: perl' >&2; exit 2; }
+  export ROUTINE_GUI_ACTIVITY_FILE="$work/gui-activity"
+  epoch_ms > "$ROUTINE_GUI_ACTIVITY_FILE"
+  phase='이전 전면 앱 기록'; phase_id=focus
+  original_app=$(osascript -l JavaScript "$share_dir/app-focus.js" capture)
+  [[ -n $original_app ]] || fail '이전 전면 앱을 확인하지 못했습니다'
+  [[ $original_app != com.tinyspeck.slackmacgap ]] || skip_auto 'Slack 전면 사용 중'
+  export ROUTINE_ORIGINAL_APP="$original_app" ROUTINE_FOCUS_HELPER="$share_dir/app-focus.js"
+  if [[ -f $out/$day.paste-attempts ]]; then attempts=$(cat "$out/$day.paste-attempts"); fi
+  [[ $attempts =~ ^[0-9]+$ ]] || fail '일일 시도 상태를 읽을 수 없습니다'
+  ((attempts < daily_attempts)) || terminal "일일 GUI 시도 ${daily_attempts}회 소진 — routine paste 실행"
+  ((attempts+=1))
+  printf '%s\n' "$attempts" > "$out/$day.paste-attempts"
+  phase='Slack 근거 초안 준비'; phase_id=draft
+  slack_ready=0
+  evidence="$out/$day.draft.json"
+  if [[ ! -f $evidence ]] || ! jq -e 'has("sources")' "$evidence" >/dev/null 2>&1; then evidence="$out/$day.json"; fi
+  if [[ -f $evidence ]] && jq -e '.sources.slack == true' "$evidence" >/dev/null 2>&1; then slack_ready=1; fi
+  if ((!no_draft && !slack_ready)) && [[ ! -e $out/$day.draft-refresh-attempted ]]; then
+    export ROUTINE_DRAFT_REFRESH_MARKER="$out/$day.draft-refresh-attempted"
+    if "$script_dir/scrum-draft" --date "$day" --slack; then :
+    else
+      code=$?
+      if ((code == 4)); then failure_reason='Slack 수집 중 사용자 입력/잠금 감지'; exit 4; fi
+      if [[ -e $ROUTINE_GUI_ACTIVITY_FILE.focus-warning ]]; then
+        terminal_kind=attention
+        terminal 'Slack 수집 후 전면 앱 복원 확인 실패 — 키 입력 주의'
+      fi
+      echo 'Slack 초안 재생성 실패: 기존 초안을 사용합니다.' >&2
+    fi
+    auto_input_guard
+  fi
+elif ((!no_draft)) && ! "$script_dir/scrum-draft" --date "$day" --slack; then
+  fail '스크럼 초안 생성에 실패해 붙여넣기를 중단했습니다.'
+fi
+[[ -f $out/$day.draft.html && -f $out/$day.draft.txt ]] || fail '기존 초안이 없습니다. 먼저 scrum-draft를 실행하세요.'
+phase='Orca 실행 준비'; phase_id=runtime
+for cmd in jq osascript; do command -v "$cmd" >/dev/null || { echo "필요한 명령이 없습니다: $cmd" >&2; exit 2; }; done
+# shellcheck source=../share/orca.sh
+source "$share_dir/orca.sh"
+orca=$(find_orca) || { echo 'Orca를 실행할 수 없습니다. /Applications/Orca.app 설치와 실행 권한을 확인하세요.' >&2; exit 2; }
+ensure_orca_runtime "$orca" || { echo 'Orca 앱 런타임이 시작되지 않았습니다. Orca를 실행한 뒤 다시 시도하세요.' >&2; exit 2; }
+phase='Slack 스레드 확인'; phase_id=thread
+state() { "$orca" computer get-app-state --app com.tinyspeck.slackmacgap --no-screenshot --json > "$work/state.json"; }
+# Re-check both the current index and its exact label immediately before clicking.
+click() {
+  local index=$1 label
+  label=$(jq -L "$share_dir" -er --argjson index "$index" 'include "slack"; tree_text|ax_lines|.[]|select(.index==$index)|.body' "$work/state.json") || fail '클릭 대상 label을 확인하지 못했습니다'
+  state
+  jq -L "$share_dir" -e --argjson index "$index" --arg label "$label" 'include "slack"; tree_text|ax_lines|any(.[];.index==$index and .body==$label)' "$work/state.json" >/dev/null || { echo '클릭 대상이 바뀌었습니다. 중단합니다.' >&2; exit 1; }
+  auto_input_guard
+  "$orca" computer click --app com.tinyspeck.slackmacgap --element-index "$index" --no-screenshot --json >/dev/null
+  auto_gui_activity
+}
+# $1=true also requires every comment to be visible (before the duplicate check).
+thread_guard() {
+  jq -L "$share_dir" -e --arg url "$expected_root_url" --argjson complete "${1:-false}" 'include "slack"; tree_text|thread_matches_root($url; $complete)' "$work/state.json" >/dev/null 2>&1 ||
+    { failure_reason='오늘 스크럼 스레드 루트 불일치 또는 준비 미완료'; echo "$failure_reason" >&2; return 1; }
+}
+stop_existing_input() {
+  local current
+  current=$(jq -L "$share_dir" -ec 'include "slack"; tree_text|thread_editor' "$work/state.json") || fail '스레드 입력창을 확인하지 못했습니다'
+  if ((!replace)) && [[ -n $(jq -r '.value' <<< "$current") ]]; then
+    if ((auto)); then terminal '입력창에 이미 내용 있음'; fi
+    terminal '입력창에 이미 내용 있음. --replace로만 교체할 수 있습니다.'
+  fi
+}
+scroll_thread() {
+  local direction=$1 pages=$2 index
+  state
+  thread_guard
+  index=$(jq -L "$share_dir" -er 'include "slack"; tree_text|thread_list_index' "$work/state.json") || fail '스크롤할 댓글 목록을 확인하지 못했습니다'
+  auto_input_guard
+  "$orca" computer scroll --app com.tinyspeck.slackmacgap --element-index "$index" --direction "$direction" --pages "$pages" --no-screenshot --json >/dev/null
+  auto_gui_activity
+  sleep 0.5
+}
+scan_thread_replies() {
+  local count current_count urls seen='[]' page own_seen=0
+  count=$(jq -L "$share_dir" -er 'include "slack"; tree_text|thread_comment_list.count' "$work/state.json") || fail '전체 댓글 수를 확인하지 못했습니다'
+  # An own comment already on screen is terminal; no need to scroll.
+  if ((!force)) && jq -L "$share_dir" -e 'include "slack"; tree_text|own_comment' "$work/state.json" >/dev/null; then
+    terminal '이미 본인 댓글이 있습니다'
+  fi
+  scroll_thread up 20
+  for page in 0 1 2 3 4 5 6 7 8 9 10 11 12; do
+    state
+    thread_guard
+    stop_existing_input
+    current_count=$(jq -L "$share_dir" -er 'include "slack"; tree_text|thread_comment_list.count' "$work/state.json") || fail '현재 댓글 수를 확인하지 못했습니다'
+    [[ $current_count == "$count" ]] || fail '스크롤 중 댓글 수가 바뀌었습니다. 다시 확인하세요.'
+    if jq -L "$share_dir" -e 'include "slack"; tree_text|own_comment' "$work/state.json" >/dev/null; then
+      own_seen=1
+      if ((!force)); then terminal '이미 본인 댓글이 있습니다'; fi
+    fi
+    urls=$(jq -L "$share_dir" -ec --arg url "$expected_root_url" 'include "slack"; tree_text|thread_reply_urls($url)' "$work/state.json") || fail '보이는 댓글 링크를 확인하지 못했습니다'
+    seen=$(jq -nc --argjson seen "$seen" --argjson urls "$urls" '$seen+$urls|unique') || fail '댓글 링크를 합치지 못했습니다'
+    [[ $(jq -r 'length' <<< "$seen") == "$count" ]] && break
+    ((page < 12)) || break
+    scroll_thread down 1
+  done
+  [[ $(jq -r 'length' <<< "$seen") == "$count" ]] || fail '스크롤 범위 안에서 전체 댓글을 확인하지 못했습니다. 다시 실행하세요.'
+  printf '댓글 %s개 확인 (본인 댓글=%s)\n' "$count" "$own_seen"
+}
+checkbox() { jq -L "$share_dir" -er 'include "slack"; tree_text|broadcast_checkbox' "$work/state.json"; }
+unchanged_checkbox() {
+  [[ $(checkbox) == "$checkbox_before" ]] || fail '채널 동시 전송 체크박스 상태가 바뀌었습니다. 전송 금지, 직접 확인하세요.'
+}
+before_hotkey() {
+  osascript -l JavaScript "$share_dir/slack-frontmost.js"
+  state
+  thread_guard
+  unchanged_checkbox
+  local current focused
+  current=$(jq -L "$share_dir" -ec 'include "slack"; tree_text|thread_editor' "$work/state.json") || fail '스레드 입력창을 확인하지 못했습니다'
+  focused=$(jq -r '.result.snapshot.focusedElementId // .snapshot.focusedElementId // empty' "$work/state.json")
+  [[ $focused == "$(jq -r '.index' <<< "$current")" ]] || { echo '스레드 입력창 포커스가 바뀌었습니다.' >&2; exit 1; }
+  if ((!replace)) && [[ -n $(jq -r '.value' <<< "$current") ]]; then terminal '입력창이 비어 있지 않습니다'; fi
+  auto_input_guard
+}
+auto_input_guard
+open "slack://channel?team=$(routine_get slack.team_id)&id=$(routine_get slack.channel_id)"
+auto_gui_activity
+sleep 3
+state
+blocks=$(jq -L "$share_dir" -ec 'include "slack"; tree_text | scrum_blocks' "$work/state.json") || { slack_format_notice '채널/스크럼 글'; fail '오늘 스크럼 글을 확인하지 못했습니다'; }
+if [[ $(jq -r 'length' <<< "$blocks") == 0 ]]; then
+  if ((auto)) && ((10#$clock >= 10#$no_post_after)); then terminal '오늘 스크럼 글 없음'; fi
+  fail "오늘 스크럼 글 없음 — $(routine_get delivery.no_post_after)까지 재시도"
+fi
+block=$(jq -er 'if length==1 then .[0] else error("오늘 스크럼 글이 여러 개입니다") end' <<< "$blocks") || fail '오늘 스크럼 글이 여러 개이거나 모호합니다'
+expected_root_url=$(jq -L "$share_dir" -er 'include "slack"; .lines[].body|select(today_timestamp)|capture("\\((?<url>https?://[^)]+)\\)").url' <<< "$block") || fail '오늘 스크럼 루트 링크를 확인하지 못했습니다'
+reply=$(jq -r '.reply // empty' <<< "$block")
+if [[ -n $reply ]]; then
+  click "$reply"
+else
+  container=$(jq -r '.container // empty' <<< "$block")
+  [[ -n $container ]] || { echo '댓글 버튼이 없습니다. 오늘 글에서 스레드에서 답장을 직접 열어 주세요.' >&2; exit 1; }
+  click "$container"
+  state
+  # Locate the revealed reply action only within the same current-day block.
+  reply=$(jq -L "$share_dir" -er 'include "slack"; tree_text | scrum_block | [.lines[]|select(.body|contains(slack_labels.reply))|.index] | if length==1 then .[0] else error("스레드에서 답장 버튼을 직접 열어 주세요") end' "$work/state.json") || fail '스레드에서 답장 버튼을 확인하지 못했습니다'
+  click "$reply"
+fi
+# Require the correct root and three consecutive stable snapshots before checking duplicates.
+previous='' stable=0
+for _ in 1 2 3 4 5 6 7 8; do
+  if ! state 2>/dev/null || ! thread_guard false 2>/dev/null; then
+    stable=0; previous=''
+    sleep 0.5
+    continue
+  fi
+  if ! fingerprint=$(jq -L "$share_dir" -ec 'include "slack"; tree_text|thread_fingerprint' "$work/state.json" 2>/dev/null); then
+    stable=0; previous=''; sleep 0.5; continue
+  fi
+  if [[ $fingerprint == "$previous" ]]; then ((stable+=1)); else stable=1; previous=$fingerprint; fi
+  ((stable>=3)) && break
+  sleep 0.5
+done
+((stable>=3)) || { slack_format_notice '스레드/루트·댓글 목록'; echo '오늘 스크럼 스레드 루트 또는 댓글 목록을 제한 시간 안에 확인하지 못했습니다. 다시 실행하세요.' >&2; exit 1; }
+# Existing content (judged on the stable snapshot) is terminal even when older replies are off screen.
+stop_existing_input
+if ! thread_guard true; then scan_thread_replies; failure_reason=''; fi
+if ((!force)) && jq -L "$share_dir" -e 'include "slack"; tree_text | own_comment' "$work/state.json" >/dev/null; then
+  if ((auto)); then terminal '이미 본인 댓글이 있습니다'; fi
+  terminal '이미 본인 댓글이 있습니다. 중복을 확인한 뒤 --force를 사용하세요.'
+fi
+editor=$(jq -L "$share_dir" -ec 'include "slack"; tree_text | thread_editor' "$work/state.json") || fail '스레드 입력창을 확인하지 못했습니다'
+phase='채널 동시 전송 체크박스 확인'; phase_id=checkbox
+checkbox_before=$(checkbox) || fail '채널 동시 전송 체크박스를 확인하지 못했습니다'
+case $checkbox_before in
+  0|false|False|off|unchecked) ;;
+  *) fail '채널 동시 전송 체크박스가 체크되어 있거나 해제 상태를 확인할 수 없습니다. 전송 금지, 직접 해제 후 확인하세요.' ;;
+esac
+value=$(jq -r '.value' <<< "$editor")
+if [[ -n $value && $replace != 1 ]]; then
+  if ((auto)); then terminal '입력창이 비어 있지 않습니다'; fi
+  terminal '입력창이 비어 있지 않습니다. --replace로만 교체할 수 있습니다.'
+fi
+click "$(jq -r '.index' <<< "$editor")"
+# Re-observe after click: stale indices or a switched panel must not paste into a channel.
+state
+thread_guard
+unchanged_checkbox
+editor=$(jq -L "$share_dir" -ec 'include "slack"; tree_text | thread_editor' "$work/state.json") || fail '스레드 입력창을 확인하지 못했습니다'
+focused=$(jq -r '.result.snapshot.focusedElementId // .snapshot.focusedElementId // empty' "$work/state.json")
+[[ $focused == "$(jq -r '.index' <<< "$editor")" ]] || { echo '스레드 입력창 포커스를 확인하지 못했습니다.' >&2; exit 1; }
+value=$(jq -r '.value' <<< "$editor")
+if [[ -n $value && $replace != 1 ]]; then terminal '입력창이 변경되었습니다. 붙여넣기를 중단합니다.'; fi
+phase='클립보드 준비 및 스레드 붙여넣기'; phase_id='paste'
+osascript -l JavaScript "$share_dir/clipboard.js" backup "$work/clipboard.json"
+clipboard_saved=1
+auto_input_guard
+osascript -l JavaScript "$share_dir/clipboard.js" set "$out/$day.draft.html" "$out/$day.draft.txt"
+if ((replace)); then
+  before_hotkey
+  "$orca" computer hotkey --app com.tinyspeck.slackmacgap --key 'Cmd+A' --no-screenshot --json >/dev/null
+  auto_gui_activity
+fi
+before_hotkey
+paste_attempted=1
+"$orca" computer hotkey --app com.tinyspeck.slackmacgap --key 'Cmd+V' --no-screenshot --json >/dev/null
+auto_gui_activity
+sleep 2
+state
+thread_guard
+unchanged_checkbox
+phase='붙여넣기 결과 스크린샷 확인'; phase_id=screenshot
+failure_reason='붙여넣기 결과 스크린샷 확인 실패'
+"$orca" computer get-app-state --app com.tinyspeck.slackmacgap --json > "$work/screenshot.json"
+screenshot=$(jq -er '.result.screenshot.path // .screenshot.path // empty' "$work/screenshot.json") || fail '붙여넣기 결과 스크린샷 경로를 확인하지 못했습니다'
+failure_reason=''
+paste_completed=1
+printf '붙여넣기 완료 (전송하지 않음). 스크린샷: %s\n' "$screenshot"

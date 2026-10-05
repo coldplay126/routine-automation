@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+script=${BASH_SOURCE[0]}
+[[ ! -L $script ]] || script=$(readlink "$script")
+script_dir=$(CDPATH='' cd -P -- "$(dirname -- "$script")" >/dev/null && pwd)
+share_dir="$script_dir/../share"
+# shellcheck source=../share/config.sh
+source "$share_dir/config.sh"
+usage() {
+  echo 'routine <setup|init|doctor|status|sources|run|collect|draft|review|style|learn|paste|copy|config|update|package|uninstall>'
+  echo 'routine --set dotted.key JSON <cmd> (CLI > ROUTINE_* > 설정 > 기본값)'
+}
+# Transient CLI overrides are applied after environment/config loading.
+overrides='[]'
+while [[ ${1:-} == --set ]]; do
+  (($#>=3)) || exit 2
+  overrides=$(command jq -c --arg key "$2" --argjson value "$3" '.+[{key:$key,value:$value}]' <<< "$overrides"); shift 3
+done
+if [[ $overrides != '[]' ]]; then export ROUTINE_CLI_OVERRIDES="$overrides"; fi
+cmd=${1:-help}; (($#==0)) || shift
+case $cmd in
+  init) exec "$script_dir/routine-init" "$@" ;;
+  setup)
+    [[ $overrides == '[]' && -z ${ROUTINE_CLI_OVERRIDES:-} ]] || { echo 'setup은 전역 --set을 받지 않습니다. setup의 init 플래그나 config set으로 저장하세요.' >&2; exit 2; }
+    exec "$script_dir/routine-setup" "$@" ;;
+  uninstall) exec "$script_dir/../uninstall.sh" "$@" ;;
+  update)
+    # shellcheck source=../share/update.sh
+    source "$share_dir/update.sh"
+    routine_update "$@"; exit ;;
+  help|-h|--help) usage; exit 0 ;;
+esac
+if [[ ${1:-} == -h || ${1:-} == --help ]]; then
+  case $cmd in
+    run) echo 'routine run [--dry-run] [--skip STEP] [--only STEP]' ;;
+    collect) echo 'routine collect [--since ISO] [--until ISO] [--out DIR] [--sources git,prs,sessions,claude_sessions,jira,notion,slack]' ;;
+    draft) echo 'routine draft [--date YYYY-MM-DD] [--out DIR] [--engine auto|claude|omp|none] [--model MODEL] [--project TEXT] [--no-llm] [--slack]' ;;
+    review) echo 'routine review [--date YYYY-MM-DD] [--no-open] — 초안 검토·복사 (전송 없음)' ;;
+    style) echo 'routine style | style preview [--date YYYY-MM-DD] | style edit — 표현·형식 설정 (LLM·전송 없음)' ;;
+    learn) echo 'routine learn [--date YYYY-MM-DD] [--paste] — 보낸 글 읽기·제안 선택 학습 (전송·자동 반영 없음)' ;;
+    paste) echo 'routine paste [--auto] [--no-draft] [--dry-run] [--force] [--replace]' ;;
+    copy) echo 'routine copy — 오늘 초안을 복사하고 채널 열기 (전송 없음)' ;;
+    doctor|status) echo "routine $cmd — 읽기 전용 상태 점검" ;;
+    sources) echo 'routine sources [enable|disable git|prs|omp_sessions|claude_sessions|jira|notion|slack]' ;;
+    config) echo 'routine config get KEY | set KEY JSON' ;;
+    package) echo 'routine package — 깨끗한 Git HEAD를 zip으로 배포' ;;
+    *) usage >&2; exit 2 ;;
+  esac
+  exit 0
+fi
+if [[ $cmd == sources || ( $cmd == config && ${1:-} == set ) ]]; then routine_load_config file; else routine_load_config; fi
+case $cmd in
+  run|collect|draft|review|learn|paste|copy) routine_require_config ;;
+esac
+case $cmd in
+  run) /bin/bash "$script_dir/morning" "$@" ;;
+  collect) "$script_dir/scrum-collect" "$@" ;;
+  draft) "$script_dir/scrum-draft" "$@" ;;
+  paste) "$script_dir/scrum-paste" "$@" ;;
+  review)
+    # shellcheck source=../share/review.sh
+    source "$share_dir/review.sh"
+    routine_review "$@" ;;
+  style)
+    # shellcheck source=../share/style.sh
+    source "$share_dir/style.sh"
+    routine_style "$@" ;;
+  learn)
+    # shellcheck source=../share/learn.sh
+    source "$share_dir/learn.sh"
+    routine_learn "$@" ;;
+  copy)
+    (($#==0)) || { echo 'routine copy는 옵션을 받지 않습니다.' >&2; exit 2; }
+    day=$(routine_day); out="$HOME/Library/Application Support/routine-automation/scrum"
+    [[ -f $out/$day.draft.html && -f $out/$day.draft.txt ]] || { echo '오늘 초안이 없습니다. routine draft 실행'; exit 1; }
+    osascript -l JavaScript "$share_dir/clipboard.js" set "$out/$day.draft.html" "$out/$day.draft.txt"
+    open "slack://channel?team=$(routine_get slack.team_id)&id=$(routine_get slack.channel_id)"
+    printf '%s\n' "$(date '+%FT%T%z')" > "$out/$day.copied"
+    printf '초안 복사 완료 — Slack에서 확인 후 직접 붙여넣고 전송하세요.%s\n' "$(routine_draft_omission_notice "$out/$day.draft.json")" ;;
+  doctor|status)
+    # shellcheck source=../share/inspect.sh
+    source "$share_dir/inspect.sh"; "routine_$cmd" "$@" ;;
+  sources)
+    # shellcheck source=../share/sources.sh
+    source "$share_dir/sources.sh"
+    routine_manage_sources "$@" ;;
+  config)
+    action=${1:-}; key=${2:-}
+    [[ $key =~ ^[a-z_]+(\.[a-z_]+)*$ ]] || { echo '설정 키 필요'; exit 2; }
+    case $action in
+      get) routine_get "$key" ;;
+      set)
+        (($#==3)) || { echo 'routine config set KEY JSON'; exit 2; }
+        command jq -L "$share_dir" -ne --arg home "$HOME" --arg user "${USER:-user}" --arg key "$key" 'include "config"; defaults($home;$user)|paths|join(".")|select(.==$key)' >/dev/null || { echo '알 수 없는 설정 키'; exit 2; }
+        persisted=$(command jq -c --arg key "$key" --argjson value "$3" 'setpath($key|split(".");$value)' <<< "$ROUTINE_FILE_SETTINGS")
+        case $key in
+          sources|sources.git|sources.git.roots)
+            # shellcheck source=../share/sources.sh
+            source "$share_dir/sources.sh"
+            normalized_roots=$(routine_normalize_git_roots "$(command jq -c '.sources.git.roots' <<< "$persisted")") || exit 2
+            persisted=$(command jq -c --argjson roots "$normalized_roots" '.sources.git.roots=$roots' <<< "$persisted") ;;
+        esac
+        routine_save_config "$persisted" ;;
+      *) echo 'routine config get KEY | set KEY JSON'; exit 2 ;;
+    esac ;;
+  package)
+    root=$(CDPATH='' cd -P -- "$script_dir/.." >/dev/null && pwd)
+    git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo '패키지는 Git 작업 트리에서 생성하세요.' >&2; exit 1; }
+    [[ -z $(git -C "$root" status --porcelain) ]] || { echo '작업 트리가 깨끗하지 않습니다. 먼저 커밋하세요.' >&2; exit 1; }
+    version=$(<"$root/VERSION")
+    [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo 'VERSION 오류'; exit 2; }
+    mkdir -p "$root/dist"
+    archive="$root/dist/routine-automation-$version.zip"
+    git -C "$root" archive --format=zip --prefix="routine-automation-$version/" -o "$archive" HEAD || { rm -f "$archive"; exit 1; }
+    if [[ -f $root/.personal-patterns ]]; then
+      pattern_status=0
+      LC_ALL=C grep -aE -f "$root/.personal-patterns" /dev/null >/dev/null 2>&1 || pattern_status=$?
+      if ((pattern_status>1)); then rm -f "$archive"; echo '로컬 개인 패턴 파일 오류 (내용은 출력하지 않음)' >&2; exit 1; fi
+      private_match=0
+      if unzip -p "$archive" | LC_ALL=C grep -aE -f "$root/.personal-patterns" >/dev/null; then private_match=1; fi
+      if unzip -Z1 "$archive" | LC_ALL=C grep -aE -f "$root/.personal-patterns" >/dev/null; then private_match=1; fi
+      if LC_ALL=C grep -aE -f "$root/.personal-patterns" "$archive" >/dev/null; then private_match=1; fi
+      if ((private_match)); then rm -f "$archive"; echo '개인 패턴이 zip에서 발견되어 배포 파일을 제거했습니다 (내용은 출력하지 않음).' >&2; exit 1; fi
+      echo '로컬 개인 패턴: zip 내용·경로·메타데이터 검사 통과'
+    else echo 'SKIP: 로컬 .personal-patterns 없음 — 개인 패턴 검사 건너뜀'; fi
+    # shellcheck source=../share/update.sh
+    source "$share_dir/update.sh"
+    if ! routine_package_verify "$root" "$archive"; then rm -f "$archive"; exit 1; fi
+    printf '패키지: %s\n' "$archive" ;;
+  *) usage >&2; exit 2 ;;
+esac

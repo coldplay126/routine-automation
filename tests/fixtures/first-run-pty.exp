@@ -1,0 +1,57 @@
+#!/usr/bin/expect -f
+set timeout 25
+set routine [lindex $argv 0]
+set helper [lindex $argv 1]
+set transcript [lindex $argv 2]
+set mode [lindex $argv 3]
+spawn /usr/bin/script -Fq $transcript /bin/bash $helper /bin/bash $routine --skip platform --skip dependencies --skip github --skip llm --skip slack --skip orca --skip disk-access --skip config --skip launchd
+expect {
+  -re {수집 중} {}
+  timeout { puts stderr "수집 단계 진행 표시 없음"; exit 1 }
+  eof { puts stderr "첫 실행 대기 전에 종료됨"; exit 1 }
+}
+set expected 0
+if {$mode eq "skip"} {
+  send -- "s"
+} elseif {$mode in {"int" "term" "quit" "hup" "tstp"}} {
+  set file [open "$env(RECORD).setup-pid" r]
+  set pid [string trim [read $file]]
+  close $file
+  if {$mode eq "tstp"} {
+    exec /bin/kill -TSTP $pid
+    expect {
+      -re {\x1b\[\?25h} {}
+      timeout { puts stderr "일시정지 커서 복원 실패"; exit 1 }
+      eof { puts stderr "일시정지 대신 종료됨"; exit 1 }
+    }
+    set file [open "$env(RECORD).tty-path" r]
+    set tty [string trim [read $file]]
+    close $file
+    exec /bin/sh -c { /bin/bash "$1" < "$2" > "$3"; } sh $env(PTY_TTY_STATE) $tty "$env(RECORD).suspended"
+    exec /bin/kill -CONT $pid
+  } else {
+    set signal [string toupper $mode]
+    set codes [dict create int 130 term 143 quit 131 hup 129]
+    exec /bin/kill -$signal $pid
+    set expected [dict get $codes $mode]
+  }
+} else {
+  expect {
+    -re {초안 작성 중 \(LLM\)} {}
+    timeout { puts stderr "수집에서 초안 작성으로 전환되지 않음"; exit 1 }
+    eof { puts stderr "초안 작성 단계 누락"; exit 1 }
+  }
+}
+expect {
+  -re {TTY_RESTORED=1} {}
+  timeout { puts stderr "터미널 입력 상태 복원 실패"; exit 1 }
+  eof { puts stderr "터미널 복원 결과 누락"; exit 1 }
+}
+expect {
+  -re "SETUP_RC=$expected" {}
+  timeout { puts stderr "첫 실행 종료 상태 오류"; exit 1 }
+  eof { puts stderr "첫 실행 종료 상태 누락"; exit 1 }
+}
+expect eof
+wait
+exit 0

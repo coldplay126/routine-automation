@@ -1,0 +1,136 @@
+#!/usr/bin/expect -f
+set timeout 30
+set routine [lindex $argv 0]
+set helper [lindex $argv 1]
+set transcript [lindex $argv 2]
+set team TEXAMPLE
+set mode [lindex $argv 3]
+set terminal com.apple.Terminal
+if {[info exists env(TERMINAL_BUNDLE)]} { set terminal $env(TERMINAL_BUNDLE) }
+proc assert_terminal_focus {} {
+  global mode env terminal
+  if {[string match "gui-*" $mode]} {
+    set focus [open "$env(RECORD).foreground" r]
+    set bundle [string trim [read $focus]]
+    close $focus
+    if {$mode eq "gui-browser" && $bundle eq "com.google.Chrome"} {
+      set focus [open "$env(RECORD).foreground" w]
+      puts $focus com.apple.Terminal
+      close $focus
+      set bundle com.apple.Terminal
+    }
+    if {$bundle ne $terminal} { puts stderr "Question appeared while Slack still owned focus"; exit 1 }
+  }
+}
+if {[string match "disk*" $mode]} {
+  spawn /usr/bin/script -q $transcript /bin/bash $helper /bin/bash $routine setup --yes --skip platform --skip dependencies --skip github --skip llm --skip slack --skip orca --skip config --skip launchd --skip first-run
+  expect {
+    -re {전체 디스크 접근.*\[Y/n\]} { if {$mode eq "disk-yes"} { send -- "y\r" } else { send -- "n\r" } }
+    timeout { puts stderr "FDA explicit confirmation timeout"; exit 1 }
+    eof { puts stderr "FDA skipped explicit confirmation"; exit 1 }
+  }
+  # Declining FDA skips the step (re-verified by first-run); it no longer aborts setup.
+  set rc 0
+  expect {
+    -re "SETUP_RC=$rc" {}
+    timeout { exit 1 }
+    eof { exit 1 }
+  }
+  expect eof
+  wait
+  exit 0
+}
+if {[string match "spinner*" $mode]} {
+  spawn /usr/bin/script -q $transcript /bin/bash $helper /bin/bash $routine setup --skip platform --skip dependencies --skip github --skip llm --skip slack --skip orca --skip disk-access --skip config --skip first-run
+  expect {
+    -re {[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏][^\r\n]*예약 실행 등록} { send -- "\r\r" }
+    timeout { puts stderr "Spinner did not start"; exit 1 }
+    eof { exit 1 }
+  }
+  set expected 0
+  if {$mode eq "spinner-signal"} {
+    set file [open "$env(RECORD).setup-pid" r]
+    set pid [string trim [read $file]]
+    close $file
+    exec /bin/kill -TERM $pid
+    set expected 143
+  }
+  expect {
+    -re {TTY_RESTORED=1} {}
+    timeout { puts stderr "Terminal mode was not restored"; exit 1 }
+    eof { exit 1 }
+  }
+  expect -re "SETUP_RC=$expected"
+  expect eof
+  wait
+  exit 0
+}
+if {$mode eq "invalid"} { set team invalid }
+set extra {}
+set skip_orca {--skip orca}
+if {$mode eq "overwrite"} { set extra {--overwrite-config --delivery-mode clipboard} }
+if {[string match "gui-*" $mode] || $mode eq "clipboard-choice"} { set skip_orca {} }
+if {$mode eq "sources-on"} { set extra [list --sources-notion-db $env(PTY_NOTION_DB)] }
+if {$mode eq "gui-custom"} { set extra [list --ui-terminal-bundle-ids {["dev.fixture.terminal"]}] }
+spawn /usr/bin/script -q $transcript /bin/bash $helper /bin/bash $routine setup --skip platform --skip dependencies --skip github --skip llm --skip slack {*}$skip_orca --skip disk-access --skip launchd --skip first-run {*}$extra
+set links 0
+set sources_answered 0
+set git_answers 0
+set git_recovered 0
+set finals 0
+while {1} {
+  expect {
+    -re {자동 붙여넣기까지 할까요.*\[y/N\]} {
+      if {$mode eq "clipboard-choice"} { send -- "n\r" } else { send -- "y\r" }
+    }
+    -re {s: 클립보드 방식으로 건너뛰기} {
+      if {$mode eq "gui-skip"} { send -- "s" }
+    }
+    -re {터미널을 클릭한 뒤 Enter[^\r\n]*} {
+      set focus [open "$env(RECORD).foreground" w]
+      puts $focus $terminal
+      close $focus
+      send -- "\r"
+    }
+    -re {스크럼 글 링크.*\]: } { send -- "https://example.slack.com/archives/CEXAMPLE/p1790895609247049\r"; incr links }
+    -re {워크스페이스 ID.*\]: } { send -- "$team\r" }
+    -re {내 Slack 표시 이름.*\]: } { assert_terminal_focus; send -- "수동 사용자\r" }
+    -re {스크럼 채널 이름.*\]: } { assert_terminal_focus; send -- "manual-channel\r" }
+    -re {스크럼 글 제목.*\]: } { assert_terminal_focus; send -- "수동 스크럼\r" }
+    -re {프로젝트 이름.*\]: } { puts stderr "Removed project prompt returned"; exit 1 }
+    -re {Git 위치 선택: } {
+      # git-recover: deselect the only location once; the re-offered selection keeps its default.
+      if {$mode eq "git-recover" && $git_answers == 0} { send -- "1\r" } else { send -- "\r" }
+      incr git_answers
+    }
+    -re {git 커밋을 수집하지 않습니다. 이대로 진행할까요\? \[y/N\] } { send -- "y\r" }
+    -re {Git 위치가 비어 있습니다. git 커밋 수집을 끌까요\? \[Y/n\] } {
+      if {$mode eq "git-recover"} { send -- "n\r" } else { send -- "y\r" }
+    }
+    -re {Git 저장소 위치를 다시 고를까요\? \[Y/n\] } { send -- "\r"; incr git_recovered }
+    -re {수집 소스 선택: } {
+      if {$mode eq "sources-on" && $sources_answered == 0} { send -- "5 6\r"
+      } elseif {$mode eq "git-recover" && $sources_answered == 0} { send -- "1\r"
+      } elseif {$mode eq "overwrite" && $sources_answered == 0} { send -- "2\r"
+      } else { send -- "\r" }
+      incr sources_answered
+    }
+    -re {Notion 작성자 이메일/LIKE 패턴.*\]: } { send -- "\r" }
+    -re {저장 전 최종 확인 \(번호\): } {
+      incr finals
+      if {$finals > 2} { puts stderr "Final validation still needs a correction: $mode"; exit 1 }
+      if {$mode eq "invalid"} { send -- "3\r" } else { send -- "1\r" }
+    }
+    -re {SETUP_RC=([01])} {
+      set rc $expect_out(1,string)
+      if {$mode eq "gui-unavailable"} {
+        if {$rc != 1} { puts stderr "Unavailable Orca was accepted"; exit 1 }
+      } elseif {$links != 1} { puts stderr "Wrong link prompt count: $links"; exit 1 }
+      expect eof
+      wait
+      exit 0
+    }
+    timeout { puts stderr "PTY setup prompt timeout (links=$links)"; exit 1 }
+    eof { puts stderr "PTY setup ended without status"; exit 1 }
+  }
+}

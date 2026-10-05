@@ -1,0 +1,10 @@
+{"type":"user","sessionId":"meta-session","isMeta":true,"isSidechain":false,"timestamp":"2026-09-25T00:00:00.000Z","cwd":"/fixture","message":{"role":"user","content":"<local-command-caveat>Caveat: ignore local commands</local-command-caveat>"}}
+{"type":"user","sessionId":"meta-session","timestamp":"2026-09-25T00:01:00.000Z","message":{"role":"user","content":"<command-name>/login</command-name>"}}
+{"type":"user","sessionId":"meta-session","timestamp":"2026-09-25T00:02:00.000Z","message":{"role":"user","content":"<local-command-stdout>Logged in</local-command-stdout>"}}
+{"type":"user","sessionId":"meta-session","timestamp":"2026-09-25T00:03:00.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-fixture","content":"tool payload"}]}}
+{"type":"user","sessionId":"meta-session","timestamp":"2026-09-25T00:04:00.000Z","message":{"role":"user","content":"[Request interrupted by user for tool use]"}}
+{"type":"user","sessionId":"meta-session","timestamp":"2026-09-25T00:05:00.000Z","message":{"role":"user","content":[{"type":"text","text":"API 상태 확인"}]}}
+{"type":"user","sessionId":"meta-session","isSidechain":true,"timestamp":"2026-09-25T00:06:00.000Z","message":{"role":"user","content":"sidechain ignored"}}
+{"type":"assistant","sessionId":"meta-session","isMeta":true,"timestamp":"2026-09-25T00:07:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"meta report ignored"}]}}
+{"type":"assistant","sessionId":"meta-session","timestamp":"2026-09-25T00:08:00.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-fixture","name":"Read","input":{"secret":"tool payload"}}]}}
+{"type":"assistant","sessionId":"meta-session","timestamp":"2026-09-25T00:09:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"확인 결과 API 정상 확인"}]}}
