@@ -6,18 +6,15 @@ routine_version_valid() { [[ $1 =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0
 routine_version_newer() {
   command jq -ne --arg new "$1" --arg old "$2" '($new|split(".")|map(tonumber)) > ($old|split(".")|map(tonumber))' >/dev/null
 }
-routine_terminal_text() {
-  command jq -nr --arg text "$1" '$text|gsub("[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]";"")'
-}
 routine_zip_reject() {
   local path
-  path=$(routine_terminal_text "$1")
-  printf 'zip 거부: %s — %s\n' "$(routine_terminal_text "$2")" "$path" >&2
+  path=$(command jq -nr --arg path "$1" '$path|gsub("[\u0000-\u001f\u007f]";"")')
+  printf 'zip 거부: %s — %s\n' "$2" "$path" >&2
 }
 # The listing is used only for path safety and size/count bounds. macOS unzip
 # loses non-ASCII filename bytes, so identities/required files come from the tree.
 routine_validate_zip() (
-  local zip=$1 destination=${2:-} entries metadata stats attributes archive_root actual_files actual_dirs member version non_regular license license_line
+  local zip=$1 destination=${2:-} entries metadata stats attributes archive_root actual_files actual_dirs member version non_regular
   [[ -f $zip && ! -L $zip ]] || { routine_zip_reject "$zip" '일반 zip 파일이 아닙니다'; return 1; }
   entries=$(unzip -Z1 "$zip" 2>/dev/null) || { routine_zip_reject "$zip" '목록 읽기 실패'; return 1; }
   command jq -Rse 'split("\n")|map(select(length>0))|
@@ -87,12 +84,9 @@ routine_validate_zip() (
   for member in VERSION install.sh bin/routine; do
     [[ -f $archive_root/$member && ! -L $archive_root/$member ]] || { routine_zip_reject "$zip" "필수 일반 파일 누락: $member"; return 1; }
   done
-  license=$(find "$archive_root" -mindepth 1 -maxdepth 1 -name LICENSE -type f -print -quit)
-  [[ -n $license && -s $license && ! -L $license ]] || {
-    routine_zip_reject "$zip" '공개 빌드가 아닌 개발판 zip — 정확한 루트 LICENSE 누락 또는 비어 있음'; return 1;
+  [[ -f $archive_root/LICENSE && ! -L $archive_root/LICENSE ]] || {
+    routine_zip_reject "$zip" '공개 빌드가 아닌 개발판 zip — 루트 LICENSE 누락'; return 1;
   }
-  IFS= read -r license_line < "$license" || [[ -n $license_line ]]
-  [[ $license_line == 'MIT License' ]] || { routine_zip_reject "$zip" '루트 LICENSE 첫 줄은 MIT License여야 합니다'; return 1; }
   [[ $(stat -f %z "$archive_root/VERSION") -le 32 ]] || { routine_zip_reject "$zip" 'VERSION 32바이트 초과'; return 1; }
   version=$(<"$archive_root/VERSION")
   routine_version_valid "$version" || { routine_zip_reject "$zip" 'VERSION 형식 오류'; return 1; }
@@ -106,62 +100,16 @@ routine_zip_version() (
   version=$(<"$directory/$archive_root/VERSION")
   printf '%s\n' "$version"
 )
-routine_cached_zip_version() (
-  local zip=$1 directory=$2 key stamp cache cached temporary version='' reason=''
-  stamp=$(stat -f '%z:%.9Fm:%.9Fc:%i' "$zip") || return 1
-  key=$(printf '%s' "$zip" | shasum -a 256); key=${key%% *}
-  cache="$directory/$key.json"
-  [[ ! -L $cache ]] || return 1
-  cached=$(command jq -ce --arg path "$zip" --arg stamp "$stamp" \
-    'select(.path==$path and .stamp==$stamp and (.version|type)=="string" and (.reason|type)=="string")' "$cache" 2>/dev/null) || cached=''
-  if [[ -n $cached ]]; then
-    version=$(command jq -r .version <<< "$cached")
-    if routine_version_valid "$version"; then printf '%s\n' "$version"; return 0; fi
-    printf '%s\n' "$(command jq -r .reason <<< "$cached")" >&2
-    return 1
-  fi
-  temporary=$(mktemp "${TMPDIR:-/tmp}/.downloads.XXXXXXXX") || return 1
-  trap 'rm -f -- "$temporary" "$temporary.reason"' EXIT
-  version=$(routine_zip_version "$zip" 2>"$temporary.reason") || { version=''; reason=$(<"$temporary.reason"); }
-  command jq -n --arg path "$zip" --arg stamp "$stamp" --arg version "$version" --arg reason "$reason" \
-    '{path:$path,stamp:$stamp,version:$version,reason:$reason}' > "$temporary" &&
-    chmod 600 "$temporary" && mv -f "$temporary" "$cache" || return 1
-  if routine_version_valid "$version"; then printf '%s\n' "$version"; return 0; fi
-  printf '%s\n' "$reason" >&2
-  return 1
-)
-routine_find_update_cached() {
-  local downloads=$1 directory=$2 zip version selected='' newest=''
+routine_find_update() {
+  local zip version downloads=${ROUTINE_DOWNLOADS_DIR:-$HOME/Downloads}
+  ROUTINE_UPDATE_ZIP='' ROUTINE_UPDATE_VERSION=''
   for zip in "$downloads"/routine-automation-*.zip; do
     [[ -e $zip || -L $zip ]] || continue
-    version=$(routine_cached_zip_version "$zip" "$directory") || continue
-    if [[ -z $newest ]] || routine_version_newer "$version" "$newest"; then selected=$zip newest=$version; fi
+    version=$(routine_zip_version "$zip") || continue
+    if [[ -z $ROUTINE_UPDATE_VERSION ]] || routine_version_newer "$version" "$ROUTINE_UPDATE_VERSION"; then
+      ROUTINE_UPDATE_ZIP=$zip ROUTINE_UPDATE_VERSION=$version
+    fi
   done
-  command jq -n --arg zip "$selected" '{zip:$zip}'
-}
-routine_find_update() {
-  local limit selected status=0 downloads=${ROUTINE_DOWNLOADS_DIR:-$HOME/Downloads}
-  local directory="$HOME/Library/Caches/routine-automation/downloads" temporary
-  ROUTINE_UPDATE_ZIP=''
-  limit=$(command -v gtimeout || command -v timeout || true)
-  [[ -n $limit ]] || { echo 'Downloads 탐색에는 gtimeout 또는 timeout이 필요합니다. ZIP 경로를 직접 지정하세요.' >&2; return 1; }
-  [[ ! -L ${directory%/*} && ! -L $directory ]] || return 1
-  mkdir -p "$directory" && chmod 700 "${directory%/*}" "$directory" || return 1
-  temporary=$(mktemp -d "$directory/.scan.XXXXXXXX") || return 1
-  # The parent owns this whole scratch tree, even when timeout kills child traps.
-  # shellcheck disable=SC2016 # The child receives the actual library and folders.
-  selected=$(TMPDIR="$temporary" "$limit" -k 1 15 /bin/bash -c 'share_dir=$1; source "$share_dir/update.sh"; routine_find_update_cached "$2" "$3"' _ "$share_dir" "$downloads" "$directory") || status=$?
-  rm -rf -- "$temporary"
-  if ((status)); then echo 'Downloads 검증 실패 또는 전체 탐색 시간 상한(15초) 초과 — 설치하지 않습니다.' >&2; return 1; fi
-  ROUTINE_UPDATE_ZIP=$(command jq -r .zip <<< "$selected")
-}
-routine_downloads_provenance() {
-  local zip=$1 digest quarantine origins
-  digest=$(shasum -a 256 "$zip"); digest=${digest%% *}
-  quarantine=$(xattr -p com.apple.quarantine "$zip" 2>/dev/null) || quarantine='없음'
-  origins=$(mdls -raw -name kMDItemWhereFroms "$zip" 2>/dev/null) || origins='조회 실패'
-  printf 'Downloads ZIP — 출처 미검증\n경로: %s\nsha256: %s\nquarantine: %s\nkMDItemWhereFroms: %s\n' \
-    "$(routine_terminal_text "$zip")" "$digest" "$(routine_terminal_text "$quarantine")" "$(routine_terminal_text "$origins")"
 }
 routine_update_notice() (
   local current day repository cache directory cached version='' release temporary
@@ -186,6 +134,8 @@ routine_update_notice() (
       '{day:$day,repository:$repo,version:$version}' > "$temporary" &&
       chmod 600 "$temporary" && mv -f "$temporary" "$cache" || return 0
   fi
+  # Offline Downloads notices retain the existing full ZIP validation path.
+  if [[ -z $version ]]; then routine_find_update 2>/dev/null; version=$ROUTINE_UPDATE_VERSION; fi
   if routine_version_valid "$version" && routine_version_newer "$version" "$current"; then
     printf '새 버전 %s — routine update\n' "$version"
   fi
@@ -197,7 +147,7 @@ routine_show_changes() {
   command jq -Rnr --arg current "$current" --arg next "$next" '
     def version: split(".")|map(tonumber);
     reduce inputs as $raw ({show:false,lines:[]};
-      ($raw|gsub("[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]";"")) as $line |
+      ($raw|gsub("[\u0000-\u0008\u000b-\u001f\u007f]";"")) as $line |
       if ($line|test("^## [0-9]+\\.[0-9]+\\.[0-9]+($| — )")) then
         ($line|capture("^## (?<v>[0-9]+\\.[0-9]+\\.[0-9]+)").v|version) as $v |
         .show=($v>($current|version) and $v<=($next|version)) |
@@ -218,7 +168,7 @@ routine_package_verify() (
   echo 'zip 자기 검증: 현재·보관된 이전 공개 버전 검증기 통과'
 )
 routine_update() (
-  local zip='' check=0 yes=0 current next archive_root temporary='' pending=0 from=auto release expected='' github_directory='' status reason downloads_source=0 downloads_root folder
+  local zip='' check=0 yes=0 current next archive_root temporary='' pending=0 from=auto release expected='' github_directory='' status reason
   trap '[[ -z $temporary ]] || rm -rf -- "$temporary"; [[ -z $github_directory ]] || rm -rf -- "$github_directory"' EXIT
   while (($#)); do
     case $1 in
@@ -244,7 +194,12 @@ routine_update() (
       echo '복구하려면 routine update --yes를 실행하세요. 기존 설치·설정 변경 없음'
       return 0
     fi
-    if ((check)); then echo '복구: routine update --yes (또는 새 패키지의 install.sh --update)'; fi
+    if ((check)); then echo '복구: routine update --yes (또는 새 패키지의 install.sh --update)'
+    else
+      routine_installation_idle || return 1
+      routine_recover_installation || return 1
+      if routine_installation_pending; then echo '소유 확인되지 않은 복구 기록을 보존했습니다. 새 패키지의 설치 도구로 확인하세요.' >&2; return 1; fi
+    fi
   fi
   if [[ -z $zip ]]; then
     if [[ $from != downloads ]]; then
@@ -254,31 +209,24 @@ routine_update() (
       if ((status==0)); then
         expected=$(command jq -r .version <<< "$release")
         zip="$github_directory/routine-automation-$expected.zip"
-        routine_release_download "$release" "$zip" 2>"$github_directory/reason" || status=$?
+        routine_release_download "$(command jq -r .url <<< "$release")" "$zip" 2>"$github_directory/reason" || status=$?
       fi
       if ((status!=0)); then
-        reason=$(routine_terminal_text "$(<"$github_directory/reason")")
+        reason=$(<"$github_directory/reason")
         printf '%s\n' "$reason" >&2
-        echo '자동 Downloads 대체는 하지 않습니다. routine update --from downloads 또는 신뢰한 ZIP을 풀어 install.sh --update를 실행하세요.' >&2
-        return 1
+        ((status!=2)) && [[ $from != github ]] || return 1
+        echo 'GitHub 사용 불가 — Downloads 방식으로 대체합니다.'
+        zip='' expected=''
       else printf '출처: GitHub 공개 Release v%s\n' "$expected"; fi
     fi
     if [[ -z $zip ]]; then
-      routine_find_update || return 1
+      routine_find_update
       zip=$ROUTINE_UPDATE_ZIP
       [[ -n $zip ]] || { echo '검증을 통과한 업데이트 zip이 없습니다. 새 zip을 Downloads에 두거나 경로를 지정하세요.'; return 0; }
     fi
   fi
   [[ -f $zip && ! -L $zip ]] || { routine_zip_reject "$zip" '일반 zip 파일 경로를 지정하세요'; return 1; }
   zip=$(CDPATH='' cd -P -- "$(dirname -- "$zip")" >/dev/null && printf '%s/%s\n' "$PWD" "${zip##*/}") || return 1
-  if [[ $from == downloads ]]; then downloads_source=1; fi
-  if [[ -z $expected ]]; then
-    for folder in "${ROUTINE_DOWNLOADS_DIR:-$HOME/Downloads}" "$HOME/Downloads"; do
-      downloads_root=$(CDPATH='' cd -P -- "$folder" 2>/dev/null && pwd) || continue
-      [[ $zip != "$downloads_root/"* ]] || downloads_source=1
-    done
-  fi
-  if ((downloads_source)); then routine_downloads_provenance "$zip"; fi
   temporary=$(mktemp -d "${TMPDIR:-/tmp}/routine-update.XXXXXXXX") || return 1
   archive_root=$(routine_validate_zip "$zip" "$temporary") || return 1
   next=$(<"$temporary/$archive_root/VERSION")
@@ -288,7 +236,7 @@ routine_update() (
   routine_version_valid "$current" || { echo '현재 설치 VERSION 오류' >&2; return 1; }
   printf '✓ zip 검증\n%s → %s\n' "$current" "$next"
   if ((pending && check)); then echo '확인만 완료 — 미완료 설치 복구는 아직 실행하지 않았습니다'; return 0; fi
-  if ((!pending)) && ! routine_version_newer "$next" "$current"; then
+  if ! routine_version_newer "$next" "$current"; then
     echo '이미 최신입니다. 같은 버전 또는 낮은 버전은 설치하지 않습니다.'
     if [[ $next != "$current" ]]; then echo '롤백은 README의 제거 후 이전 패키지 설치 절차를 따르세요.'; fi
     return 0
@@ -298,19 +246,9 @@ routine_update() (
   (( !check )) || { echo '확인만 완료 — 설치본·설정 변경 없음'; return 0; }
   # shellcheck source=ui.sh
   source "$share_dir/ui.sh"
-  if ((downloads_source)); then
-    if [[ ! -t 0 || ! -t 1 ]]; then echo 'Downloads 설치는 --yes여도 TTY 확인이 필수입니다. 터미널에서 routine update --from downloads를 실행하세요. 변경 없음' >&2; return 1; fi
-    ui_confirm "출처 미검증 Downloads ZIP을 신뢰하고 $next 버전으로 업데이트할까요?" false || { echo '업데이트 취소 — 기존 설치 유지'; return 0; }
-  elif ((!yes)); then
+  if ((!yes)); then
     if [[ ! -t 0 || ! -t 1 ]]; then echo '설치하려면 터미널에서 routine update 또는 --yes를 사용하세요. 변경 없음'; return 0; fi
     ui_confirm "$next 버전으로 업데이트할까요?" || { echo '업데이트 취소 — 기존 설치 유지'; return 0; }
-  fi
-  if ((pending)); then
-    routine_installation_idle || return 1
-    routine_recover_installation || return 1
-    if routine_installation_pending; then echo '소유 확인되지 않은 복구 기록을 보존했습니다. 새 패키지의 설치 도구로 확인하세요.' >&2; return 1; fi
-    current=$(<"$share_dir/../VERSION")
-    if ! routine_version_newer "$next" "$current"; then echo '중단 설치 복구 완료 — 이미 최신입니다.'; return 0; fi
   fi
   routine_installation_idle || return 1
   export ROUTINE_UPDATE_ZIP_PATH="$zip"

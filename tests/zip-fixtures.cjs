@@ -77,7 +77,10 @@ create('crc-high', [...core('98.0.0'), { name: 'README.md', badCRC: true }]);
 create('version-32', core(`${'9'.repeat(27)}.0.0`));
 create('version-33', core(`${'9'.repeat(28)}.0.0`));
 create('size-over', [...core('97.0.0'), { name: 'README.md', data: Buffer.alloc(64 * 1024 * 1024) }]);
-create('controls', [...core('2.0.0'), { name: 'CHANGELOG.md', data: '## 2.0.0\n안내\u001b[31m\u0007본문\u007f\n' }]);
+create('controls', [...core('2.0.0'), { name: 'CHANGELOG.md', data: '## 2.0.0\n안내\u001b[31m\u0007본문\u007f\u009b31m\u009d8;;https://evil.example\u009c\u200e\u200f\u202e\u2066위장\u2069\n' }]);
+create('license-case', core('2.0.0').map(entry => entry.name === 'LICENSE' ? { ...entry, name: 'license' } : entry));
+create('license-empty', core('2.0.0').map(entry => entry.name === 'LICENSE' ? { ...entry, data: '' } : entry));
+create('license-identity', core('2.0.0').map(entry => entry.name === 'LICENSE' ? { ...entry, data: 'Not MIT\n' } : entry));
 for (const host of [0, 3, 10]) create(`symlink-host-${host}`, [...core('2.0.0'), { name: 'link', data: 'VERSION', host, mode: 0o120777 }]);
 create('symlink-write', [...core('2.0.0'),
   { name: 'link', data: '../../escaped', host: 0, mode: 0o120777 },

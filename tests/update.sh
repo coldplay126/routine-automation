@@ -4,13 +4,15 @@ repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 real_jq=${TEST_JQ_BIN:-$(type -P jq)}
 real_node=$(type -P node)
+export REAL_DOWNLOADS_TIMEOUT
+REAL_DOWNLOADS_TIMEOUT=$(PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin builtin type -P gtimeout || PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin builtin type -P timeout)
 while IFS= read -r name; do [[ $name != ROUTINE_* ]] || unset "$name"; done < <(compgen -v)
 sandbox=$(mktemp -d /tmp/routine-update-tests.XXXXXXXX)
 cleanup() {
   local status=$?
   if ((status)); then
     [[ ! -f $sandbox/failure ]] || cat "$sandbox/failure" >&2
-    for output in "$sandbox"/highest "$sandbox"/command "$sandbox"/rollback "$sandbox"/updated "$sandbox"/schema-zip-guide "$sandbox"/incompatible-package; do
+    for output in "$sandbox"/highest "$sandbox"/command "$sandbox"/rollback "$sandbox"/updated "$sandbox"/schema-zip-guide "$sandbox"/incompatible-package "$sandbox"/public-downloads-installed "$sandbox"/tty-output; do
       [[ ! -f $output ]] || { printf '\n%s:\n' "${output##*/}" >&2; cat "$output" >&2; }
     done
   fi
@@ -52,6 +54,11 @@ STUB
 cat > "$STUB_ROOT/xattr" <<'STUB'
 #!/bin/bash
 printf 'xattr %s\n' "$*" >> "$RECORD"
+[[ ${1:-} != -p ]] || printf '0081;fixture;browser;download-id\n'
+STUB
+cat > "$STUB_ROOT/mdls" <<'STUB'
+#!/bin/bash
+printf '("https://github.com/coldplay126/routine-automation/releases")\n'
 STUB
 cat > "$STUB_ROOT/gh" <<'STUB'
 #!/bin/bash
@@ -72,7 +79,7 @@ for cmd in brew open orca omp claude gum; do
   printf '#!/bin/bash\nprintf "forbidden %%s\\n" "$0" >> "$RECORD"\nexit 87\n' > "$STUB_ROOT/$cmd"
 done
 chmod +x "$STUB_ROOT/"*
-for cmd in jq launchctl osacompile osascript xattr gh git gtimeout brew open orca omp claude gum; do ln -s "$STUB_ROOT/$cmd" "$HOME/.local/bin/$cmd"; done
+for cmd in jq launchctl osacompile osascript xattr mdls gh git gtimeout brew open orca omp claude gum; do ln -s "$STUB_ROOT/$cmd" "$HOME/.local/bin/$cmd"; done
 # Both PATH and exported functions protect subprocesses that rebuild PATH.
 launchctl() {
   if [[ ${1:-} == bootstrap && $(cat "$HOME/.local/share/routine-automation/VERSION") == "${CRASH_VERSION:-never}" ]]; then
@@ -83,15 +90,21 @@ launchctl() {
 osacompile() { "$STUB_ROOT/osacompile" "$@"; }
 osascript() { "$STUB_ROOT/osascript" "$@"; }
 xattr() { "$STUB_ROOT/xattr" "$@"; }
+mdls() { "$STUB_ROOT/mdls" "$@"; }
 brew() { "$STUB_ROOT/brew" "$@"; }
 open() { "$STUB_ROOT/open" "$@"; }
 orca() { "$STUB_ROOT/orca" "$@"; }
 omp() { "$STUB_ROOT/omp" "$@"; }
 claude() { "$STUB_ROOT/claude" "$@"; }
 gum() { "$STUB_ROOT/gum" "$@"; }
+gtimeout() {
+  if [[ ${REAL_LIMIT_TEST:-0} == 1 ]]; then "$REAL_DOWNLOADS_TIMEOUT" "$@"
+  else "$STUB_ROOT/gtimeout" "$@"; fi
+}
 ditto() {
   if [[ ${4:-} == "$TMPDIR"/routine-update.* ]]; then
     [[ $(stat -f %Lp "$4") == 700 ]] || { echo '업데이트 임시 디렉터리가 공개됨' >&2; return 86; }
+    [[ ${STALL_ZIP_VALIDATION:-0} != 1 ]] || /bin/sleep 30
   fi
   /usr/bin/ditto "$@"
 }
@@ -100,7 +113,7 @@ type() {
   if [[ ${1:-} == -P && ${2:-} == jq && ${MISSING_JQ:-0} == 1 ]]; then return 1; fi
   builtin type "$@"
 }
-export -f launchctl osacompile osascript xattr brew open orca omp claude gum ditto type
+export -f launchctl osacompile osascript xattr mdls brew open orca omp claude gum gtimeout ditto type
 routine="$repo/bin/routine"
 "$routine" init --non-interactive --slack-link https://example.slack.com/archives/CEXAMPLE/p1790895609247049 --slack-team-id TEXAMPLE --sources-git-enabled false --draft-llm-engine none > "$sandbox/init"
 # An omitted new key is filled by the new code's defaults, not by rewriting config.
@@ -137,6 +150,7 @@ plist_before=$(shasum -a 256 "$plist")
 package_repo="$sandbox/package"
 git init -q -b main "$package_repo"
 cp -R "$source_dir/bin" "$source_dir/share" "$source_dir/launchd" "$package_repo/"
+cp -R "$repo/tools" "$package_repo/"
 cp "$source_dir/VERSION" "$source_dir/install.sh" "$source_dir/uninstall.sh" "$source_dir/CHANGELOG.md" "$source_dir/routine 설치.command" "$repo/설치 방법.txt" "$repo/.gitignore" "$package_repo/"
 cp "$repo/README.md" "$repo/LICENSE" "$package_repo/"
 git -C "$package_repo" add -A .
@@ -162,18 +176,30 @@ printf '99.0.0\n' > "$HOME/Downloads/routine-automation-99.0.0/VERSION"
 printf 'not a zip\n' > "$HOME/Downloads/routine-automation-broken.zip"
 "$real_node" "$repo/tests/zip-fixtures.cjs" "$sandbox/edge"
 for kind in missing-high crc-high version-33 size-over; do cp "$sandbox/edge/$kind.zip" "$HOME/Downloads/routine-automation-$kind.zip"; done
-"$installed/bin/routine" update --check > "$sandbox/highest" </dev/null
+"$installed/bin/routine" update --from downloads --check > "$sandbox/highest" </dev/null
 grep -q '0.0.1 → 0.10.0' "$sandbox/highest" || fail '내부 VERSION 최고 수치 버전 선택 실패'
 grep -q '^## 0.1.1' "$sandbox/highest" || fail '현재→새 버전 변경 내역 누락'
 ! grep -q '^## 0.0.1' "$sandbox/highest" || fail '현재 버전 내역까지 표시'
 snapshot > "$sandbox/after"; cmp -s "$sandbox/before" "$sandbox/after" || fail '--check가 설치본을 변경'
+mkdir "$sandbox/timed-downloads"
+cp "$HOME/Downloads/routine-automation-a.zip" "$sandbox/timed-downloads/routine-automation-stalled.zip"
+timer_start=$SECONDS
+if REAL_LIMIT_TEST=1 STALL_ZIP_VALIDATION=1 ROUTINE_DOWNLOADS_DIR="$sandbox/timed-downloads" "$installed/bin/routine" update --from downloads --check > "$sandbox/downloads-timeout" 2>&1; then fail '지연된 Downloads 검증이 시간 상한 없이 통과'; fi
+timer_elapsed=$((SECONDS-timer_start))
+((timer_elapsed>=14 && timer_elapsed<=24)) || fail '실제 Downloads 검증 15초 종료 상한 실패'
+snapshot > "$sandbox/after"; cmp -s "$sandbox/before" "$sandbox/after" || fail 'Downloads 시간 초과가 설치본 변경'
+[[ -z $(find "$HOME/Library/Caches/routine-automation/downloads" -mindepth 1 \( ! -type f -o ! -name '*.json' \) -print -quit) ]] || fail '시간 초과가 압축 해제·캐시 임시 파일을 남김'
 for kind in korean no-directories version-32 controls; do
   "$installed/bin/routine" update "$sandbox/edge/$kind.zip" --check > "$sandbox/accept-$kind" 2>&1 || fail "정상 zip 거부: $kind"
   grep -q '✓ zip 검증' "$sandbox/accept-$kind" || fail "정상 zip 검증 완료 누락: $kind"
 done
-! grep -q $'\033\\|\007\\|\177' "$sandbox/accept-controls" || fail 'CHANGELOG 제어문자 출력'
+command jq -Rse 'test("[\u001b\u0007\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]")|not' "$sandbox/accept-controls" >/dev/null || fail 'CHANGELOG C0·C1·bidi 제어문자 출력'
+control_zip="$sandbox/untrusted"$'\302\233\342\200\256'".zip"
+cp "$sandbox/edge/duplicate.zip" "$control_zip"
+if "$installed/bin/routine" update "$control_zip" --check > "$sandbox/reject-controls" 2>&1; then fail '중복 ZIP 허용'; fi
+command jq -Rse 'test("[\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]")|not' "$sandbox/reject-controls" >/dev/null || fail '거부 메시지 C1·bidi 제어문자 출력'
 mkdir "$TMPDIR/escaped"; printf '보존\n' > "$TMPDIR/escaped/payload"
-for kind in duplicate case-alias normalization-alias local-name local-double-slash missing-high crc-high version-33 size-over symlink-host-0 symlink-host-3 symlink-host-10 symlink-write; do
+for kind in duplicate case-alias normalization-alias local-name local-double-slash missing-high crc-high version-33 size-over symlink-host-0 symlink-host-3 symlink-host-10 symlink-write license-case license-empty license-identity; do
   if "$installed/bin/routine" update "$sandbox/edge/$kind.zip" --check > "$sandbox/reject-$kind" 2>&1; then
     cp "$sandbox/reject-$kind" "$sandbox/failure"; fail "잘못된 실제 zip 허용: $kind"
   fi
@@ -185,16 +211,18 @@ snapshot > "$sandbox/after"; cmp -s "$sandbox/before" "$sandbox/after" || fail '
 rm "$HOME/Downloads/routine-automation-a.zip" "$HOME/Downloads/routine-automation-z.zip"
 # Read-only status and real morning entrypoint notify; no installer/first-run.
 "$installed/bin/routine" status > "$sandbox/status"
-grep -q '새 버전 0.1.1 — routine update' "$sandbox/status" || fail 'status 새 버전 안내 누락'
+! grep -q '새 버전' "$sandbox/status" || fail 'GitHub 실패가 Downloads 버전을 알림'
 "$installed/bin/morning" --only omp-update > "$sandbox/morning" </dev/null
-grep -q '새 버전 0.1.1 — routine update' "$sandbox/morning" || fail 'morning 요약 새 버전 안내 누락'
-grep -q '새 버전 0.1.1 — routine update' "$RECORD.notice" || fail 'morning 알림 새 버전 안내 누락'
+! grep -q '새 버전' "$sandbox/morning" || fail 'morning이 Downloads 버전을 알림'
+! grep -q '새 버전' "$RECORD.notice" 2>/dev/null || fail 'Downloads 새 버전 OS 알림'
 snapshot > "$sandbox/after"; cmp -s "$sandbox/before" "$sandbox/after" || fail '알림이 자동 설치'
-"$installed/bin/routine" update > "$sandbox/non-tty" </dev/null
+if "$installed/bin/routine" update --from downloads --yes > "$sandbox/non-tty" 2>&1 </dev/null; then fail 'Downloads --yes 비TTY 설치 허용'; fi
 snapshot > "$sandbox/after"; cmp -s "$sandbox/before" "$sandbox/after" || fail '비TTY 무동의 업데이트 실행'
-grep -q -- '--yes' "$sandbox/non-tty" || fail '비TTY 업데이트 동의 안내 누락'
-printf 'n\n' | /usr/bin/script -q "$sandbox/tty-update" "$installed/bin/routine" update > "$sandbox/tty-output"
+grep -q 'TTY 확인' "$sandbox/non-tty" || fail 'Downloads 비TTY 거부 안내 누락'
+/usr/bin/expect -f "$repo/tests/fixtures/update-pty.exp" "$installed/bin/routine" "$sandbox/tty-update" n --from downloads --yes > "$sandbox/tty-output"
 snapshot > "$sandbox/after"; cmp -s "$sandbox/before" "$sandbox/after" || fail 'TTY 확인 거절 후 업데이트 실행'
+trusted_update="$sandbox/trusted-update.zip"
+cp "$HOME/Downloads/routine-automation-current.zip" "$trusted_update"
 # Real malicious ZIPs, not mocked unzip output. bsdtar preserves hostile names with -P.
 printf '경로 탈출 fixture\n' > "$source_dir/payload"
 make_zip 2.0.0 "$sandbox/base.zip"
@@ -221,18 +249,18 @@ for kind in traversal absolute missing symlink multiple; do
   [[ ! -e $sandbox/escaped ]] || fail 'zip 경로 탈출'
 done
 # Failed new LaunchAgent loading must roll back the complete owned generation.
-if ROUTINE_CONFIG="$HOME/.config/routine-automation/config.json" "$installed/bin/routine" update --check > "$sandbox/mismatched-config" 2>&1; then fail '다른 설정 경로로 업데이트 허용'; fi
+if ROUTINE_CONFIG="$HOME/.config/routine-automation/config.json" "$installed/bin/routine" update "$trusted_update" --check > "$sandbox/mismatched-config" 2>&1; then fail '다른 설정 경로로 업데이트 허용'; fi
 grep -Fq "$HOME/team/config.json" "$sandbox/mismatched-config" || fail '기존 설정 경로 안내 누락'
 for lock in "$HOME/Library/Logs/routine-automation/.morning.lock" "$HOME/Library/Application Support/routine-automation/scrum/.scrum-paste.lock"; do
   mkdir "$lock"; printf '%s\n' "$$" > "$lock/pid"
-  if "$installed/bin/routine" update --yes > "$sandbox/active-lock" 2>&1; then fail '실행 중 파일 교체 허용'; fi
+  if "$installed/bin/routine" update "$trusted_update" --yes > "$sandbox/active-lock" 2>&1; then fail '실행 중 파일 교체 허용'; fi
   snapshot > "$sandbox/after"; cmp -s "$sandbox/before" "$sandbox/after" || fail '실행 중 설치본 변경'
   rm -rf "$lock"
 done
-if FAIL_VERSION=0.1.1 "$installed/bin/routine" update --yes > "$sandbox/rollback" 2>&1; then fail '예약 등록 실패를 성공 처리'; fi
+if FAIL_VERSION=0.1.1 "$installed/bin/routine" update "$trusted_update" --yes > "$sandbox/rollback" 2>&1; then fail '예약 등록 실패를 성공 처리'; fi
 snapshot > "$sandbox/after"; cmp -s "$sandbox/before" "$sandbox/after" || fail '설치 실패 롤백이 기존 자산 변경'
 launchctl print "gui/$(id -u)/$(jq -r '.launchd.label_prefix' "$ROUTINE_CONFIG").morning" >/dev/null || fail '이전 LaunchAgent 복원 실패'
-/usr/bin/env -u ROUTINE_CONFIG "$installed/bin/routine" update --yes > "$sandbox/updated" </dev/null
+/usr/bin/env -u ROUTINE_CONFIG "$installed/bin/routine" update "$trusted_update" --yes > "$sandbox/updated" </dev/null
 [[ $(cat "$installed/VERSION") == 0.1.1 && $(cat "$installed/install-id") == "$id_before" ]] || fail '업데이트 버전/설치 신원 보존 실패'
 [[ $(shasum -a 256 "$ROUTINE_CONFIG") == "$config_before" ]] || fail '업데이트가 설정 파일 변경'
 [[ $(shasum -a 256 "$plist") != "$plist_before" ]] || fail '새 LaunchAgent 템플릿 미반영'
@@ -254,7 +282,7 @@ done
 # Alternate download location and explicit paths do not depend on cwd.
 mkdir "$sandbox/downloads"
 make_zip 0.2.0 "$sandbox/downloads/routine-automation-next.zip"
-ROUTINE_DOWNLOADS_DIR="$sandbox/downloads" "$installed/bin/routine" update --check > "$sandbox/alternate" </dev/null
+ROUTINE_DOWNLOADS_DIR="$sandbox/downloads" "$installed/bin/routine" update --from downloads --check > "$sandbox/alternate" </dev/null
 grep -q '0.1.1 → 0.2.0' "$sandbox/alternate" || fail '다운로드 경로 환경 변수 무시'
 (CDPATH="$sandbox" && cd "$sandbox" && /bin/bash home/.local/share/routine-automation/bin/routine update downloads/routine-automation-next.zip --check) > "$sandbox/cdpath"
 grep -q '0.1.1 → 0.2.0' "$sandbox/cdpath" || fail 'CDPATH가 상대 zip 경로 손상'

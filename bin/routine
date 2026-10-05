@@ -42,7 +42,8 @@ if [[ ${1:-} == -h || ${1:-} == --help ]]; then
     learn) echo 'routine learn [--date YYYY-MM-DD] [--paste] — 보낸 글 읽기·제안 선택 학습 (전송·자동 반영 없음)' ;;
     paste) echo 'routine paste [--auto] [--no-draft] [--dry-run] [--force] [--replace]' ;;
     copy) echo 'routine copy — 오늘 초안을 복사하고 채널 열기 (전송 없음)' ;;
-    doctor|status) echo "routine $cmd — 읽기 전용 상태 점검" ;;
+    doctor) echo 'routine doctor — 읽기 전용 상태 점검' ;;
+    status) echo 'routine status — 상태 점검·공개 Release 하루 1회 조회/0600 캐시 포함 (Downloads 탐색·설치 없음)' ;;
     sources) echo 'routine sources [enable|disable git|prs|omp_sessions|claude_sessions|jira|notion|slack]' ;;
     config) echo 'routine config get KEY | set KEY JSON' ;;
     package) echo 'routine package — 깨끗한 Git HEAD를 zip으로 배포' ;;

@@ -23,7 +23,7 @@ mkdir -p "$HOME/.local/bin" "$TMPDIR" "$XDG_CONFIG_HOME"
 ln -s "$TEST_JQ_BIN" "$HOME/.local/bin/jq"
 # shellcheck source=network.sh
 source "$repo/tests/network.sh"
-shellcheck -x -P SCRIPTDIR "$repo"/bin/* "$repo"/share/*.sh "$repo"/install.sh "$repo"/uninstall.sh "$repo/routine 설치.command" "$repo"/tests/*.sh
+shellcheck -x -P SCRIPTDIR "$repo"/bin/* "$repo"/share/*.sh "$repo"/tools/*.sh "$repo"/install.sh "$repo"/uninstall.sh "$repo/routine 설치.command" "$repo"/tests/*.sh
 export PATH="$HOME/.local/bin:$PATH"
 export ROUTINE_REPO_ROOT="$sandbox/repos" ROUTINE_OMP_SESSIONS="$sandbox/sessions"
 export ROUTINE_CHROME_DIR="$sandbox/chrome" ROUTINE_NOTION_DB="$sandbox/notion.db"
@@ -386,6 +386,7 @@ if OMP_TIMEOUT=137 "$repo/bin/morning" --only omp-update > "$sandbox/killed-time
 "$repo/tests/scrum.sh"
 "$repo/tests/team-package.sh"
 "$repo/tests/update.sh"
+"$repo/tests/release.sh"
 "$repo/tests/onboarding.sh"
 "$repo/tests/gum-ui.sh"
 "$repo/tests/first-run-ui.sh"

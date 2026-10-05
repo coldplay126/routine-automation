@@ -1,0 +1,18 @@
+#!/usr/bin/expect -f
+set timeout 40
+set routine [lindex $argv 0]
+set transcript [lindex $argv 1]
+set answer [lindex $argv 2]
+set args [lrange $argv 3 end]
+spawn /usr/bin/script -q $transcript /bin/bash $routine update {*}$args
+expect {
+  -re {\[y/N\] } { send -- "$answer\r" }
+  timeout { puts stderr "Downloads TTY 확인 질문 없음"; exit 1 }
+  eof { puts stderr "Downloads 확인 전에 종료됨"; exit 1 }
+}
+expect {
+  eof {}
+  timeout { puts stderr "Downloads 확인 후 종료 지연"; exit 1 }
+}
+set result [wait]
+exit [lindex $result 3]

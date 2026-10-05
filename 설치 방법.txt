@@ -37,13 +37,15 @@ Downloads에 압축을 푼 기본 폴더가 있다면 터미널에 아래 한 �
 공식 공개 Release에서 최신 베타까지 찾아 줍니다. 인증 없는 curl을 쓰므로 업데이트에는 gh가 필요하지 않습니다.
 실행: routine update
 비교만: routine update --check
-질문 없이 업데이트: routine update --yes
+GitHub 확인 질문 생략: routine update --yes (Downloads 확인은 생략하지 못함)
 오프라인 Downloads 탐색: routine update --from downloads
 공개 Release만 사용: routine update --from github
 다른 위치의 zip: routine update "/경로/routine-automation-<VERSION>.zip"
-네트워크 실패·요청 제한·빈 목록이면 이유를 표시하고 Downloads의 검증된 zip으로 대체합니다.
-asset 누락·허용 외 URL·잘못된 크기·태그와 VERSION 불일치는 설치하지 않습니다.
-공개 빌드(루트 LICENSE 포함)만 설치하며, LICENSE 없는 개발판 zip은 경로와 이유를 안내하고 제외합니다.
+네트워크 실패·요청 제한·빈 목록이면 이유와 수동 경로만 안내하며 Downloads로 자동 대체하지 않습니다.
+asset 업로드 상태·정확한 URL·크기·SHA-256 digest·태그와 VERSION 불일치는 설치하지 않습니다.
+루트 LICENSE는 정확한 대소문자·비어 있지 않은 파일·첫 줄 MIT License를 확인합니다. 이 개발판 필터는 출처 증명이 아닙니다.
+Downloads는 경로·sha256·quarantine·다운로드 출처를 표시하고 TTY에서 확인해야 합니다. --yes여도 확인하며 비TTY 설치는 거부합니다.
+--check는 설치 없이 출처를 확인할 수 있습니다. Downloads 검증은 파일 상태별 캐시와 15초 전체 탐색 상한을 사용합니다.
 새 zip 설치 전 현재 버전 → 새 버전과 변경 내역이 표시됩니다.
 같거나 낮은 버전은 설치하지 않습니다. 롤백 절차는 README.md에 있습니다.
 사용자가 받은 zip은 그대로 남고, GitHub에서 받은 임시 zip은 종료 시 정리합니다.
@@ -52,7 +54,8 @@ asset 누락·허용 외 URL·잘못된 크기·태그와 VERSION 불일치는 �
 아침 루틴/붙여넣기 실행 중에는 끝난 뒤 다시 업데이트하세요.
 미완료 설치가 남으면 routine update --yes로 복구하세요. --check는 복구하지 않습니다.
 새 필수 설정 안내가 나오면 새 zip을 직접 풀어 그 안의 설치 런처/설정 도구를 실행하세요.
-status와 아침 알림의 새 버전 확인은 하루 한 번 캐시하며 자동 설치하지 않습니다.
+status와 아침 알림은 공개 GitHub 버전만 하루 한 번 조회·캐시하며 Downloads 탐색·자동 설치는 하지 않습니다.
+기존 공개 0.1.0 클라이언트에서는 routine update --from github로 최신 패키지로 업데이트하세요.
 
 업데이트 명령이 없거나 더 높은 번호의 비공개 개발 설치본에서 공개 베타로 전환하는 경우:
 새 zip을 풀고 터미널에서 다음을 한 번 실행하세요. 경로는 실제 푼 위치로 바꾸세요.
