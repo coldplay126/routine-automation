@@ -1,13 +1,35 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034 # failure_reason is consumed by caller cleanup.
+# $2 (optional): the Orca state file that failed to parse. Its accessibility *structure* is kept for
+# diagnosis with text, values, names and organisation identifiers masked (share/slack.jq structure_dump).
+# $3 (optional): a step trace (one line per poll; no screen text) appended to the capture.
 slack_format_notice() {
-  local message="Slack/Orca 화면 형식 변경 의심 — $1"
+  local message="Slack/Orca 화면 형식 변경 의심 — $1" state=${2:-} trace=${3:-} dir stamp old captures
   printf '%s\n' "$message" >&2
   failure_reason=$message
+  if [[ -n $state && -r $state ]]; then
+    dir="$HOME/Library/Logs/routine-automation/slack-format"
+    stamp="$(date '+%Y%m%d-%H%M%S')-$$"
+    if (umask 077 && mkdir -p "$dir" && chmod 700 "$dir" &&
+        jq -L "${share_dir:?}" -r --arg what "$1" \
+          'include "slack"; [tree_text|structure_dump] | if length==0 then error("empty") else
+            "# routine \($what) — 화면 구조만 저장(본문·값·이름·조직 식별자 가림, 로컬 진단용)", .[] end' \
+          "$state" > "$dir/$stamp.tmp" &&
+        { [[ -z $trace || ! -r $trace ]] || { printf '# 폴링 추적\n'; cat "$trace"; } >> "$dir/$stamp.tmp"; } &&
+        mv -f "$dir/$stamp.tmp" "$dir/$stamp.txt") 2>/dev/null; then
+      printf '진단용 화면 구조: %s\n' "$dir/$stamp.txt" >&2
+      # Keep the 20 most recent captures (our own names only; never recurse or follow other files).
+      captures=("$dir"/[0-9]*-[0-9]*-[0-9]*.txt)
+      if ((${#captures[@]} > 20)); then
+        for old in "${captures[@]:0:${#captures[@]}-20}"; do [[ -f $old ]] && rm -f -- "$old"; done
+      fi
+    else rm -f -- "$dir/$stamp.tmp" 2>/dev/null; fi
+  fi
   [[ ${ROUTINE_SLACK_FORMAT_DEFERRED:-0} != 1 ]] || return 0
   if command -v osascript >/dev/null; then
     osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "routine"' -e 'end run' "$message" || true
   fi
+  return 0
 }
 # A shared activity file propagates our last GUI action across draft/collect children.
 hid_idle_ns() {

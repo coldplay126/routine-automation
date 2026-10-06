@@ -505,6 +505,30 @@ for mode in old duplicate delayed-duplicate nonempty no-reply multi wrong-root w
   if [[ $mode != checkbox-paste ]]; then ! grep -q 'hotkey' "$CALLS" || fail "Abort pasted: $mode"; fi
   if [[ $mode == wrong-root || $mode == wrong-url || $mode == never-ready ]]; then [[ $(cat "$STAGE.polls") == 8 ]] || fail "Unready thread was not retried until timeout: $mode"; fi
 done
+# Unrecognised Slack screens leave a redacted structure capture plus the per-poll trace.
+capture_dir="$HOME/Library/Logs/routine-automation/slack-format"
+rm -rf -- "$capture_dir"; mkdir -p "$capture_dir"
+# 25 older captures and a user file: only our 20 newest names survive, the user file is untouched.
+for n in $(seq -w 1 25); do printf 'old\n' > "$capture_dir/20200101-0000$n-1.txt"; done
+printf 'mine\n' > "$capture_dir/notes.txt"
+if PASTE_MODE=wrong-url ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-paste" --no-draft > /dev/null 2>&1; then fail 'Unrecognised thread accepted'; fi
+new_capture=$(grep -L '^old$' "$capture_dir"/[0-9]*-[0-9]*-[0-9]*.txt)
+[[ -n $new_capture && $new_capture != *$'\n'* ]] || fail 'Format failure left no single structure capture'
+[[ $(stat -f %Lp "$new_capture") == 600 && $(stat -f %Lp "$capture_dir") == 700 ]] || fail 'Structure capture permissions'
+captures=("$capture_dir"/[0-9]*-[0-9]*-[0-9]*.txt)
+[[ ${#captures[@]} == 20 && ! -e $capture_dir/20200101-000001-1.txt && -e $capture_dir/20200101-000025-1.txt && -e $capture_dir/notes.txt ]] || fail 'Structure capture retention'
+! grep -q '예제팀: 예제팀' "$new_capture" || fail 'Structure capture kept message text'
+grep -q '^\[46\] link \[오늘' "$new_capture" || fail 'Structure capture dropped thread links'
+if ! grep -q '^# 폴링 추적' "$new_capture" || ! grep -q '^poll 8: state=성공 root_match=' "$new_capture"; then fail 'Structure capture lacks the poll trace'; fi
+[[ -z $(find "$capture_dir" -name '*.tmp') ]] || fail 'Structure capture left a temporary file'
+# Masking is the default: names, non-timestamp links, URL secrets, other hosts/channels, unknown roles
+# and wrapped values never survive; organisation identifiers become placeholders.
+sensitive='{"result":{"snapshot":{"treeText":"0 표준 윈도우 ch(채널) - 회사명 - Slack\n\t1 container 홍길동: 작업 비밀내용\n\t2 link [회사 비밀 문서](https://x.example/doc?token=abc)\n\t3 link [오늘, 오전 8:00:10](https://acme.slack.com/archives/C1/p1?thread_ts=1.2&cid=C1&secret=z)\n\t3 link [오늘, 오전 8:00](https://evil.example/홍길동/비밀#frag)\n\t4 버튼 홍길동\n\t5 버튼 3개의 댓글\n\t6 팝업 버튼 사용자: 홍길동\n\t7 텍스트, Value: 워크플로\n\t8 체크박스 (settable) ch(으)로도 전송, Value: 0\n\t9 container, Text: 비밀 본문\n\t10 container 스크럼-팀: 팀 일일 업무 비밀\n\t11 내용 목록 ch의 스레드 (채널, 12개의 댓글)\n\t11 내용 목록 ch (채널 홍길동 비밀문서 (채널)\n\t12 텍스트 엔트리 영역 (settable) ch 스레드에 댓글 남기기, Value: 비밀 초안\n\t13 알수없는역할 홍길동\n\t\t010 1234 홍길동 연락처\n\t14 내용 목록 다른채널 (채널)"}}}'
+dump=$(command jq -L "$repo/share" -nr --argjson routine '{"slack":{"channel_name":"ch","post_title":"스크럼-팀","workspace_domain":"acme","channel_id":"C1"}}' --argjson s "$sensitive" 'include "slack"; $s|tree_text|structure_dump' 2>&1) || fail "Structure dump failed: $dump"
+! grep -qE '홍길동|비밀|회사명|token|secret|워크플로|다른채널|acme|C1|evil|1234|010' <<< "$dump" || fail 'Structure dump leaked text, names, identifiers or URL secrets'
+for kept in '버튼 3개의 댓글' 'link [오늘, 오전 8:00:10](https://⟨workspace⟩.slack.com/archives/⟨channel⟩/p1?thread_ts=1.2)' 'Value: 0' 'container ⟨post_title⟩: ' '내용 목록 ⟨channel_name⟩의 스레드 (채널, 12개의 댓글)'; do
+  grep -qF "$kept" <<< "$dump" || fail "Structure dump lost structure: $kept"
+done
 for option in force replace; do
   mode=duplicate; [[ $option != replace ]] || mode=nonempty
   printf 'original clipboard\n' > "$CLIPBOARD"; : > "$CALLS"

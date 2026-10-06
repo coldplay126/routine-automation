@@ -340,7 +340,7 @@ open "slack://channel?team=$(routine_get slack.team_id)&id=$(routine_get slack.c
 auto_gui_activity
 sleep 3
 state
-blocks=$(jq -L "$share_dir" -ec 'include "slack"; tree_text | scrum_blocks' "$work/state.json") || { slack_format_notice '채널/스크럼 글'; fail '오늘 스크럼 글을 확인하지 못했습니다'; }
+blocks=$(jq -L "$share_dir" -ec 'include "slack"; tree_text | scrum_blocks' "$work/state.json") || { slack_format_notice '채널/스크럼 글' "$work/state.json"; fail '오늘 스크럼 글을 확인하지 못했습니다'; }
 if [[ $(jq -r 'length' <<< "$blocks") == 0 ]]; then
   if ((auto)) && ((10#$clock >= 10#$no_post_after)); then terminal '오늘 스크럼 글 없음'; fi
   fail "오늘 스크럼 글 없음 — $(routine_get delivery.no_post_after)까지 재시도"
@@ -360,21 +360,31 @@ else
   click "$reply"
 fi
 # Require the correct root and three consecutive stable snapshots before checking duplicates.
-previous='' stable=0
+# Each poll's outcome (no screen text) goes to a trace kept with any format-failure capture.
+previous='' stable=0 poll=0
+: > "$work/poll-trace"
 for _ in 1 2 3 4 5 6 7 8; do
-  if ! state 2>/dev/null || ! thread_guard false 2>/dev/null; then
+  ((poll+=1))
+  if ! state 2>/dev/null; then
+    stable=0; previous=''; printf 'poll %s: state=실패\n' "$poll" >> "$work/poll-trace"; sleep 0.5; continue
+  fi
+  if ! thread_guard false 2>/dev/null; then
     stable=0; previous=''
-    sleep 0.5
-    continue
+    jq -L "$share_dir" -r --arg url "$expected_root_url" --arg poll "$poll" 'include "slack"; tree_text |
+      "poll \($poll): state=성공 root_match=\(try (thread_root|[.lines[]|.body|select(timestamp_link)|capture("\\((?<u>https?://[^)]+)\\)").u]==[$url]) catch "오류") comment_list=\(try (thread_comment_list.count|tostring) catch "없음") thread_panel=\(try (thread_lines|length|tostring) catch "없음")"' \
+      "$work/state.json" >> "$work/poll-trace" 2>/dev/null || printf 'poll %s: state=성공 guard=불일치\n' "$poll" >> "$work/poll-trace"
+    sleep 0.5; continue
   fi
   if ! fingerprint=$(jq -L "$share_dir" -ec 'include "slack"; tree_text|thread_fingerprint' "$work/state.json" 2>/dev/null); then
-    stable=0; previous=''; sleep 0.5; continue
+    stable=0; previous=''; printf 'poll %s: state=성공 guard=일치 fingerprint=실패\n' "$poll" >> "$work/poll-trace"; sleep 0.5; continue
   fi
-  if [[ $fingerprint == "$previous" ]]; then ((stable+=1)); else stable=1; previous=$fingerprint; fi
+  changed=예; [[ $fingerprint != "$previous" ]] || changed=아니오
+  if [[ $changed == 아니오 ]]; then ((stable+=1)); else stable=1; previous=$fingerprint; fi
+  printf 'poll %s: state=성공 guard=일치 fingerprint=성공 직전대비변경=%s stable=%s\n' "$poll" "$changed" "$stable" >> "$work/poll-trace"
   ((stable>=3)) && break
   sleep 0.5
 done
-((stable>=3)) || { slack_format_notice '스레드/루트·댓글 목록'; echo '오늘 스크럼 스레드 루트 또는 댓글 목록을 제한 시간 안에 확인하지 못했습니다. 다시 실행하세요.' >&2; exit 1; }
+((stable>=3)) || { slack_format_notice '스레드/루트·댓글 목록' "$work/state.json" "$work/poll-trace"; echo '오늘 스크럼 스레드 루트 또는 댓글 목록을 제한 시간 안에 확인하지 못했습니다. 다시 실행하세요.' >&2; exit 1; }
 # Existing content (judged on the stable snapshot) is terminal even when older replies are off screen.
 stop_existing_input
 if ! thread_guard true; then scan_thread_replies; failure_reason=''; fi

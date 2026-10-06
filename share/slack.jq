@@ -143,3 +143,45 @@ def broadcast_checkbox:
     .[0].body | try capture("(?:Value|값|Checked|선택됨):[[:space:]]*(?<value>.*)$").value catch error("채널 동시 전송 상태가 없습니다") end;
 def thread_fingerprint:
   {root:(try (thread_root.lines|map(.body)) catch null),thread:(thread_lines|map(.body))};
+# Accessibility outline for diagnosing Slack format changes. Everything is masked by default
+# (replaced by its length); only roles, indexes, exactly known control labels and 0/1 checkbox values
+# stay. Organisation identifiers become placeholders that still show whether they match the settings:
+# workspace host → ⟨workspace⟩, channel ID → ⟨channel⟩/⟨other⟩, channel name → ⟨channel_name⟩,
+# post title → ⟨post_title⟩. Timestamp links keep only that shape plus a numeric thread_ts.
+def structure_dump:
+  def masked: "⟨\(length)자⟩";
+  slack_settings as $s |
+  ($ARGS.named.routine.slack.workspace_domain // "") as $domain |
+  ($ARGS.named.routine.slack.channel_id // "") as $channel_id |
+  def control: test("^([0-9]+개의 댓글|스레드의 댓글|스레드에서 답장|스레드에 댓글 달기|스레드 요약|반응 추가\\.\\.\\.|메시지 전달\\.\\.\\.|나중을 위해 저장|추가 작업|닫기|검색|전송|채널 작업 더 보기|메시지 작업|이모티콘 추가|더보기)$");
+  def roles: "표준 윈도우|HTML 콘텐츠|팝업 버튼|전환 버튼|버튼|텍스트 엔트리 영역|내용 목록|윤곽체 행|탭 그룹|탭|툴바|체크박스|체크상자|메뉴 항목|콤보 상자|이미지|텍스트|link|container|그룹|정적 텍스트";
+  def link_out:
+    ([capture("^link \\[(?<label>(오늘|어제|[0-9]{1,2}월 [0-9]{1,2}일), (오전|오후) [0-9]{1,2}:[0-9]{2}(:[0-9]{2})?(\\. 채널에서 열기)?)\\]\\((?<url>[^)]*)\\)$")][0]) as $m |
+    if $m==null then "link "+(sub("^link ";"")|masked)
+    else ([$m.url|capture("^https://(?<host>[a-z0-9-]+)\\.slack\\.com/archives/(?<ch>[A-Z0-9]+)/p(?<p>[0-9]+)(\\?(?<q>[^#]*))?$")][0]) as $u |
+      if $u==null then "link [\($m.label)](\($m.url|masked))"
+      else ([($u.q // "")|split("&")[]|select(test("^thread_ts=[0-9]+\\.[0-9]+$"))][0]) as $ts |
+        "link [\($m.label)](https://\(if $u.host==$domain and $domain!="" then "⟨workspace⟩" else "⟨other_workspace⟩" end).slack.com/archives/\(if $u.ch==$channel_id and $channel_id!="" then "⟨channel⟩" else "⟨other:\($u.ch[0:1])⟩" end)/p\($u.p)\(if $ts then "?"+$ts else "" end))" end end;
+  # Text before a ", Text:"/", Value:" field or after the role: kept only when it is a known control
+  # or the configured channel/post structure (as placeholders); "(settable)" survives, the rest is masked.
+  def head_out($role):
+    if .=="" then ""
+    elif (($role|test("버튼$")) or $role=="container") and control then " "+.
+    elif $role=="container" and ($s.channel_name|length)>0 and .==($s.channel_name+slack_labels.thread_panel) then " ⟨channel_name⟩"+slack_labels.thread_panel
+    elif $role=="container" and ($s.post_title|length)>0 and startswith($s.post_title+":") then " ⟨post_title⟩: "+(.[($s.post_title|length)+1:]|masked)
+    elif $role=="내용 목록" and ($s.channel_name|length)>0 and startswith($s.channel_name) and (.[($s.channel_name|length):]|test("^(의 스레드)? \\(채널(, [0-9]+개의 댓글)?\\)$")) then " ⟨channel_name⟩"+.[($s.channel_name|length):]
+    elif startswith("(settable)") then " (settable)"+(sub("^\\(settable\\) ?";"") | if .=="" then "" else " "+masked end)
+    else " "+masked end;
+  # A line whose role is not recognised may be a wrapped value; its leading number is not trusted
+  # as an index and is masked with the rest.
+  ax_lines[] | .raw as $raw |
+  ($raw|capture("^(?<i>[[:space:]]*)").i) as $indent |
+  .body as $body |
+  ([$body|capture("^(?<role>("+roles+"))(?=[ ,]|$)(?<rest>.*)$")][0]) as $m |
+  if .index==null or $m==null then $indent+($raw|ltrimstr($indent)|masked)
+  else ($raw|capture("^(?<p>[[:space:]]*(\\[[0-9]+\\]|[0-9]+)[[:space:]]*)").p) + (
+    if $m.role=="link" then $body|link_out
+    else ($m.rest|sub("^ ";"")) as $rest |
+      ([$rest|capture("^(?<head>.*?),? ?(?<k>Text|Value|값):[[:space:]]*(?<v>.*)$")][0]) as $f |
+      if $f!=null then "\($m.role)\($f.head|sub(",$";"")|head_out($m.role)), \($f.k): \(if ($f.v|test("^[01]$")) then $f.v else ($f.v|masked) end)"
+      else $m.role+($rest|head_out($m.role)) end end) end;
