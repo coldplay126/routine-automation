@@ -76,10 +76,13 @@ def search_result_lines:
   [range(0;$lines|length)|select($lines[.].body|search_list_label)][0] as $s |
   ([$lines[$s+1:]|to_entries[]|select(.value.indent<=$lines[$s].indent)|.key+$s+1][0] // ($lines|length)) as $end |
   $lines[$s:$end];
+# Each result message carries exactly one permalink labelled with its time; links inside the message
+# (mentions, files, previews) are body content, not results.
+def search_result_link: test("^link \\[(오늘|어제|[0-9]{1,2}월 [0-9]{1,2}일|[0-9]{4}년 [0-9]{1,2}월 [0-9]{1,2}일|[월화수목금토일]요일), (오전|오후) [0-9]{1,2}:[0-9]{2}(:[0-9]{2})?\\]\\(https?://[^/)]+/archives/[^)]+\\)$");
 def search_results:
   search_result_lines as $lines |
   [range(1;$lines|length) as $i | $lines[$i] |
-   select(.body|test("^link \\[.*\\]\\(https?://")) |
+   select(.body|search_result_link) |
    (.body|capture("^link \\[(?<ts_text>[^]]+)\\]\\((?<url>https?://[^)]+)\\)$")) as $link |
    [range(1;$i) as $h |
     select($lines[$h].body|test("^container(?:[, ]|$)")) |
