@@ -3,7 +3,8 @@ def defaults($home; $user):
   slack:{team_id:"",workspace_domain:"",channel_id:"",channel_name:"",post_title:"",post_time_prefix:"오전 8:0"},
   draft:{project:"",markers:"none",headers:{yesterday:"어제 작업한 내용",today:"오늘의 작업 계획"},categories:["현황 파악","배포","개발","인프라","업무 자동화","기타"],format:{bullets:["•","◦","▪","▪"],layout:"tree",max_items_per_section:null},llm:{engine:"auto",model:null}},
   sources:{git:{enabled:true,roots:[($home+"/Documents/GitHub")]},prs:{enabled:true},omp_sessions:{enabled:true,dir:($home+"/.omp/agent/sessions")},claude_sessions:{enabled:true,dir:($home+"/.claude/projects")},jira:{enabled:false,chrome_dir:($home+"/Library/Application Support/Google/Chrome")},notion:{enabled:false,db:($home+"/Library/Application Support/Notion/notion.db")},slack:{enabled:false}},
-  collect:{until:"today_start"},
+  collect:{until:"today_start",max_days:14},
+  calendar:{public_holidays:"kr",days_off:[],work_days:[],day_off_notes:{}},
   ui:{terminal_bundle_ids:["com.apple.Terminal","com.googlecode.iterm2","net.kovidgoyal.kitty","com.mitchellh.ghostty","org.alacritty","com.github.wez.wezterm","com.microsoft.VSCode","com.microsoft.VSCodeInsiders","com.todesktop.230313mzl4w4u","com.jetbrains.intellij","com.jetbrains.intellij.ce","com.jetbrains.pycharm","com.jetbrains.pycharm.ce","com.jetbrains.WebStorm","com.jetbrains.goland","com.jetbrains.CLion","com.jetbrains.rider","com.jetbrains.rubymine","com.jetbrains.PhpStorm","com.jetbrains.datagrip","dev.warp.Warp-Stable","com.cmuxterm.app","com.stablyai.orca"]},
   delivery:{mode:"clipboard",window:{start:"08:10",end:"11:30"},no_post_after:"09:00",idle_seconds:180,daily_attempts:6},
   morning:{time:"08:00",weekdays:[1,2,3,4,5],extra_steps:{omp_update:false,claude_update:false,npm_update:false,aws_session:false}},
@@ -15,6 +16,10 @@ def migrate_config:
 def nonempty: type=="string" and test("[^[:space:]]");
 def texts: type=="array" and all(.[];nonempty);
 def clock: type=="string" and test("^([01][0-9]|2[0-3]):[0-5][0-9]$");
+def calendar_date:
+ type=="string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$") and
+ (try ((.+ "T00:00:00Z"|fromdateiso8601|strftime("%Y-%m-%d"))==.) catch false);
+def calendar_dates: type=="array" and all(.[];calendar_date) and length==(unique|length);
 def format_errors:
  [(if (.draft.format|type)!="object" then "draft.format"
    else
@@ -32,6 +37,10 @@ def config_ok:
  (format_errors|length==0) and
  (.sources|type=="object" and all(.[];type=="object" and (.enabled|type=="boolean"))) and
  (.sources.git.roots|texts and length==(unique|length)) and (.collect.until|IN("now","today_start")) and
+ (.collect.max_days|type=="number" and .==floor and .>=1) and
+ (.calendar|type=="object") and (.calendar.public_holidays|IN("kr","none")) and
+ (.calendar.days_off|calendar_dates) and (.calendar.work_days|calendar_dates) and
+ (.calendar.day_off_notes|type=="object" and all(to_entries[];(.key|calendar_date) and (.value|type=="string"))) and
  (.ui.terminal_bundle_ids|texts and all(.[];test("^[A-Za-z0-9][A-Za-z0-9._-]+$")) and length==(unique|length)) and
  ([.sources.omp_sessions.dir,.sources.claude_sessions.dir,.sources.jira.chrome_dir,.sources.notion.db]|all(.[];nonempty)) and
  (.delivery.mode|IN("clipboard","gui-paste")) and ([.delivery.window.start,.delivery.window.end,.delivery.no_post_after,.morning.time]|all(.[];clock)) and (.delivery.window.start<=.delivery.window.end) and

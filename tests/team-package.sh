@@ -685,11 +685,11 @@ jq -e '.exit_code!=0' "$HOME/Library/Application Support/routine-automation/.set
 grep -q '✗ first-run' "$sandbox/first-run-failure" || fail 'First-run failure not displayed'
 cp "$sandbox/claude-out/2026-09-28.json" "$out/2026-09-28.json"
 "$routine" status > "$sandbox/status"
-grep -q '다음 예약: 2026-09-29 08:00' "$sandbox/status" || fail 'Status next schedule'
+grep -q '다음 예약: 2026-09-29(화) 08:00' "$sandbox/status" || fail 'Status next schedule'
 grep -q 'claude_sessions: 1건' "$sandbox/status" || fail 'Status source count'
 grep -q '전달 \[copied\]:' "$sandbox/status" || fail 'Status delivery marker'
 ROUTINE_TZ=UTC "$routine" status > "$sandbox/status-utc"
-grep -q '다음 예약: 2026-09-28 08:00' "$sandbox/status-utc" || fail 'Schedule ignored absolute now offset'
+grep -q '다음 예약: 2026-09-28(월) 08:00' "$sandbox/status-utc" || fail 'Schedule ignored absolute now offset'
 if LAUNCH_BOOTOUT_FAIL=1 "$routine" uninstall > /dev/null 2>&1; then fail 'Uninstall removed active failed-bootout service'; fi
 [[ -f $plist ]] || fail 'Failed bootout removed plist'
 cp "$ROUTINE_CONFIG" "$sandbox/config-before-uninstall"

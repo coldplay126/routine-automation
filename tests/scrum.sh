@@ -119,7 +119,9 @@ case $2 in
     index=''
     while (($#)); do if [[ $1 == --element-index ]]; then index=$2; break; fi; shift; done
     case $index in 5|10) echo combo > "$STAGE" ;; 17) echo results > "$STAGE" ;; 31|33) echo thread > "$STAGE" ;; 30) echo reveal > "$STAGE" ;; 44) echo focused > "$STAGE" ;; *) exit 87 ;; esac ;;
-  set-value) echo query > "$STAGE" ;;
+  set-value)
+    while (($#)); do if [[ $1 == --value ]]; then printf '%s\n' "$2" > "$STAGE.query"; break; fi; shift; done
+    echo query > "$STAGE" ;;
   press-key) [[ $stage == query && ${SEARCH_MODE:-} == fallback ]] || exit 88; echo results > "$STAGE" ;;
   hotkey)
     if [[ ${PASTE_MODE:-} == fail-v ]]; then exit 89; fi
@@ -156,14 +158,15 @@ case $2 in
           tree=$(jq -r '.result.snapshot.treeText' "$FIXTURES/$fixture")
         fi ;;
       query)
-        focus=15; tree='[15] 콤보 상자, Value: from:me after:2026-09-24'
+        query=$(cat "$STAGE.query")
+        focus=15; tree="[15] 콤보 상자, Value: $query"
         case ${SEARCH_MODE:-} in
           fallback) ;;
           unsafe) focus=99 ;;
           loading)
             polls=$(cat "$STAGE.query.polls" 2>/dev/null || echo 0); polls=$((polls+1)); echo "$polls" > "$STAGE.query.polls"
-            if ((polls>=3)); then tree=$(jq -r '.result.snapshot.treeText' "$FIXTURES/slack-search-suggestion.json"); fi ;;
-          *) tree+=$'\n[17] 메뉴 항목, Value: from:me after:2026-09-24 검색' ;;
+            if ((polls>=3)); then tree=$(jq -r --arg query "$query" '.result.snapshot.treeText|gsub("from:me after:2026-09-24";$query)' "$FIXTURES/slack-search-suggestion.json"); fi ;;
+          *) tree+=$'\n'"[17] 메뉴 항목, Value: $query 검색" ;;
         esac ;;
       results)
         tree=$'[20] link [금요일, 오전 9:00](https://slack.example/archives/C1/p1790294400000000)\n[21] container, Text: 운영 배포 완료 token=secret123\n[22] 스레드: #제품\n[23] link [금요일, 오전 9:05](https://slack.example/archives/C1/p1790294700000000)\n[24] container, Text: 다음 작업\n[25] 스레드: #개발'
@@ -520,8 +523,7 @@ jq -Rn '[inputs] | (map(test("click.*--element-index 44"))|index(true)) as $comp
 # Unattended runs use deterministic ioreg/date and the existing GUI/model stubs.
 cat > "$HOME/.local/bin/date" <<'DATE'
 #!/usr/bin/env bash
-if [[ ${1-} == -r && ${3-} == '+%u' && -n ${AUTO_WEEKDAY:-} ]]; then echo "$AUTO_WEEKDAY"
-elif [[ ${1-} == -r && ${3-} == '+%H%M' && -n ${AUTO_CLOCK:-} ]]; then echo "$AUTO_CLOCK"
+if [[ ${1-} == -r && ${3-} == '+%H%M' && -n ${AUTO_CLOCK:-} ]]; then echo "$AUTO_CLOCK"
 elif [[ ${1-} == +%s && -f $AUTO_EPOCH_FILE ]]; then cat "$AUTO_EPOCH_FILE"
 else exec /bin/date "$@"; fi
 DATE
@@ -591,7 +593,7 @@ for condition in locked nonconsole idle bad-idle weekend early late pasted skipp
     nonconsole) export AUTO_CONSOLE=No ;;
     idle) export AUTO_IDLE=179999999999 ;;
     bad-idle) export AUTO_BAD_IDLE=1 ;;
-    weekend) export AUTO_WEEKDAY=6 ;;
+    weekend) export ROUTINE_NOW='2026-10-10T09:00:00+09:00' ;;
     early) export AUTO_CLOCK=0809 ;;
     late) export AUTO_CLOCK=1131 ;;
     pasted) touch "$out/2026-09-28.pasted" ;;
@@ -610,14 +612,15 @@ for condition in locked nonconsole idle bad-idle weekend early late pasted skipp
     no-text) mv "$sandbox/auto.txt" "$out/2026-09-28.draft.txt" ;;
     morning) rm -rf -- "$HOME/Library/Logs/routine-automation/.morning.lock" ;;
     disabled) rm "$out/../autopaste.disabled" ;;
+    weekend) export ROUTINE_NOW='2026-09-28T09:00:00+09:00' ;;
   esac
-  unset AUTO_LOCKED AUTO_CONSOLE AUTO_IDLE AUTO_BAD_IDLE AUTO_WEEKDAY AUTO_CLOCK
+  unset AUTO_LOCKED AUTO_CONSOLE AUTO_IDLE AUTO_BAD_IDLE AUTO_CLOCK
 done
 # Outside-hours calls do not create an ever-growing daily log.
 auto_reset
 auto_log="$HOME/Library/Logs/routine-automation/scrum-paste-2026-09-28.log"
 rm -f -- "$auto_log"
-AUTO_WEEKDAY=6 run_auto; AUTO_CLOCK=0809 run_auto; AUTO_CLOCK=1131 run_auto
+ROUTINE_NOW='2026-10-10T09:00:00+09:00' run_auto; AUTO_CLOCK=0809 run_auto; AUTO_CLOCK=1131 run_auto
 [[ ! -e $auto_log ]] || fail 'Outside-hours calls created a daily log'
 auto_reset
 echo com.tinyspeck.slackmacgap > "$FOREGROUND"

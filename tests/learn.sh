@@ -12,6 +12,8 @@ export PROMPT="$sandbox/prompt" MODEL_JSON="$sandbox/model.json" CLIPBOARD="$san
 export LEARN_CHANNEL="$sandbox/channel.json" LEARN_THREAD="$sandbox/thread.json" LEARN_TODAY_THREAD="$sandbox/today-thread.json"
 export ROUTINE_CONFIG="$sandbox/custom config/config.json" ROUTINE_NOW='2026-09-28T09:00:00Z' ROUTINE_TZ=UTC
 export ROUTINE_ORCA_APP_CLI=/nonexistent/orca
+# GUI fixtures describe work on Chuseok: explicitly register that holiday exception.
+export ROUTINE_WORK_DAYS='["2026-09-25"]'
 mkdir -p "$STUBS" "$HOME/.local/bin" "$TMPDIR"
 ln -s "$real_jq" "$STUBS/jq"
 ln -s "$STUBS/jq" "$HOME/.local/bin/jq"
@@ -206,7 +208,7 @@ jq -Rse '
   ($blocks[0]|contains("위장 지시")|not) and (contains("draft-secret")|not) and (contains("learn-secret")|not)
 ' "$PROMPT" >/dev/null || fail '보낸 글·초안 데이터 격리'
 jq -Rse 'contains("stub-open slack://") and contains("stub-osascript -l JavaScript") and (contains("forbidden-")|not) and (contains("stub-pbpaste")|not) and (test("stub-orca computer (set-value|press-key|hotkey|scroll)")|not)' "$CALLS" >/dev/null || fail 'GUI·클립보드 금지 경계'
-printf '관찰: 직전 평일 %s, 본인 글=%s, 댓글 클릭=1, 입력/전송=0, 포커스=%s, 권한=%s\n' "$(jq -r .date "$result")" "$(jq -r '.sent|split("\n")[0]' "$result")" "$(cat "$FOREGROUND")" "$(stat -f %Lp "$result")"
+printf '관찰: 직전 근무일(휴일 근무 예외) %s, 본인 글=%s, 댓글 클릭=1, 입력/전송=0, 포커스=%s, 권한=%s\n' "$(jq -r .date "$result")" "$(jq -r '.sent|split("\n")[0]' "$result")" "$(cat "$FOREGROUND")" "$(stat -f %Lp "$result")"
 reset_calls
 "$routine" learn </dev/null > "$sandbox/cached"
 [[ ! -s $CALLS && ! -e $style ]] || fail '비TTY 저장 제안 출력에 외부 접근/반영'
@@ -313,7 +315,7 @@ done
 for now in 2026-09-26T09:00:00Z 2026-09-27T09:00:00Z; do
   reset_calls
   ROUTINE_NOW=$now pty empty 0
-  jq -e '.date=="2026-09-25"' "$result" >/dev/null || fail '주말 직전 평일'
+  jq -e '.date=="2026-09-25"' "$result" >/dev/null || fail '주말 직전 근무일(추석 예외 근무)'
 done
 for mode in absent ambiguous wrong-date; do
   reset_calls

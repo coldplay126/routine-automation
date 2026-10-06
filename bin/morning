@@ -64,11 +64,19 @@ done
 if [[ -f $setup_marker ]]; then
   skip+=(omp-update claude-update npm-update aws-session scrum-paste)
 fi
+day=$(routine_day)
+nonwork_reason=$(routine_workday_reason "$day")
+calendar_warning=$(routine_calendar_warning "$day")
+if [[ -n $nonwork_reason ]]; then skip+=(scrum-collect scrum-draft scrum-paste); fi
 log_dir="$HOME/Library/Logs/routine-automation"
 commands=('omp update' 'claude update' 'npm update -g' "$script_dir/scrum-collect" "$script_dir/scrum-draft" "$script_dir/scrum-paste --auto" 'aws-session-check')
 if ((dry_run)); then
   for index in "${!steps[@]}"; do
     step=${steps[index]}
+    if [[ $step == scrum-* && -n $nonwork_reason ]]; then
+      printf '%s: skipped(%s)\n' "$step" "$nonwork_reason"
+      continue
+    fi
     if { [[ ${only[1]-} ]] && ! contains "$step" "${only[@]}"; } || contains "$step" "${skip[@]}"; then
       printf '%s: skipped\n' "$step"
     else
@@ -78,11 +86,12 @@ if ((dry_run)); then
       fi
     fi
   done
+  [[ -z $calendar_warning ]] || printf '%s\n' "$calendar_warning"
   exit 0
 fi
 mkdir -p "$log_dir"
 chmod 700 "$log_dir"
-log="$log_dir/morning-$(date '+%Y-%m-%d').log"
+log="$log_dir/morning-$day.log"
 lock="$log_dir/.morning.lock"
 notify() {
   if command -v osascript >/dev/null; then
@@ -127,7 +136,8 @@ failures=() summary=() failures_count=0
 for index in "${!steps[@]}"; do
   step=${steps[index]}
   if { [[ ${only[1]-} ]] && ! contains "$step" "${only[@]}"; } || contains "$step" "${skip[@]}"; then
-    summary+=("$step:skipped")
+    if [[ $step == scrum-* && -n $nonwork_reason ]]; then summary+=("$step:skipped($nonwork_reason)")
+    else summary+=("$step:skipped"); fi
     if [[ $step == scrum-paste ]]; then printf 'paste-done\n' > "$lock/stage"; fi
     continue
   fi
@@ -166,13 +176,17 @@ if ((failures_count)); then
 else
   notice='모든 단계 완료'
 fi
+if [[ -n $nonwork_reason ]]; then
+  summary_reason="스크럼:skipped($nonwork_reason)"
+  printf '%s\n' "$summary_reason" | tee -a "$log"
+  notice+=" — $summary_reason"
+fi
+if [[ -n $calendar_warning ]]; then
+  printf '%s\n' "$calendar_warning" | tee -a "$log"
+  notice+=$'\n'"$calendar_warning"
+fi
 if contains 'scrum-draft:ok' "${summary[@]%%(*}"; then
-  paste_day=$(date '+%Y-%m-%d')
-  if [[ -n ${ROUTINE_NOW:-} ]]; then
-    stamp=${ROUTINE_NOW/Z/+0000}
-    stamp=$(printf '%s' "$stamp" | sed -E 's/([+-][0-9]{2}):([0-9]{2})$/\1\2/')
-    paste_day=$(date -j -f '%Y-%m-%dT%H:%M:%S%z' "$stamp" '+%Y-%m-%d')
-  fi
+  paste_day=$day
   paste_out="$HOME/Library/Application Support/routine-automation/scrum/$paste_day"
   if [[ $(routine_get delivery.mode) == clipboard ]]; then
     notice+=' — 초안 준비 — 검토: routine review'

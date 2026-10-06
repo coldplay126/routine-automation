@@ -61,10 +61,10 @@ routine="$repo/bin/routine"
 export ROUTINE_NOW='2026-09-28T09:00:00+09:00'
 out="$HOME/Library/Application Support/routine-automation/scrum"; : > "$RECORD.git-logs"
 "$routine" collect --sources git --out "$out"
-jq -e '.window.since=="2026-09-24T15:00:00Z" and .window.until=="2026-09-27T15:00:00Z" and (.git|map(.subject)|sort)==["Friday work","Nested work","Sunday work"] and .errors==[]' "$out/2026-09-28.json" >/dev/null || fail 'Monday cutoff included today or missed a depth-two repository'
+jq -e '.window.since=="2026-09-22T15:00:00Z" and .window.until=="2026-09-27T15:00:00Z" and (.git|map(.subject)|sort)==["Friday work","Nested work","Sunday work"] and .errors==[]' "$out/2026-09-28.json" >/dev/null || fail 'Holiday-aware cutoff included today or missed a depth-two repository'
 jq -Rse 'split("\n")|map(select(length>0))|length==2' "$RECORD.git-logs" >/dev/null || fail 'Common-dir/worktree dedup repeated repository reads'
 "$routine" draft --date 2026-09-28 --no-llm --out "$sandbox/implicit-draft"
-jq -e '.window.since=="2026-09-24T15:00:00Z" and .window.until=="2026-09-27T15:00:00Z" and (.git|map(.subject)|sort)==["Friday work","Nested work","Sunday work"]' "$sandbox/implicit-draft/2026-09-28.json" >/dev/null || fail 'Implicit draft collection ignored the configured cutoff'
+jq -e '.window.since=="2026-09-22T15:00:00Z" and .window.until=="2026-09-27T15:00:00Z" and (.git|map(.subject)|sort)==["Friday work","Nested work","Sunday work"]' "$sandbox/implicit-draft/2026-09-28.json" >/dev/null || fail 'Implicit draft collection ignored the configured cutoff'
 "$routine" collect --sources git --out "$out" --until '2026-09-28T09:00:00+09:00'
 jq -e '(.git|map(.subject)|sort)==["Friday work","Midnight work","Monday work","Nested work","Sunday work"] and .window.until=="2026-09-28T00:00:00Z"' "$out/2026-09-28.json" >/dev/null || fail 'Explicit --until did not override the midnight policy'
 "$routine" config set collect.until '"now"'
@@ -257,6 +257,6 @@ command jq -L "$share_dir" --argjson routine "$settings" --slurpfile source "$sa
 jq -e '.html|contains("<li>예제 프로젝트<ul><li>개발<ul>")' "$sandbox/project.json" >/dev/null || fail 'Explicit project lost its HTML hierarchy'
 jq -e '.text|contains("• 예제 프로젝트\n  ◦ 개발") and (contains("(병합)")|not)' "$sandbox/project.json" >/dev/null || fail 'Explicit project/default marker rendering drifted'
 "$routine" status > "$sandbox/status"
-grep -q '수집 기간: 2026-09-24T15:00:00Z ~ 2026-09-27T15:00:00Z' "$sandbox/status" || fail 'Status did not show the actual collection window'
+grep -q '수집 기간: 2026-09-22T15:00:00Z ~ 2026-09-27T15:00:00Z' "$sandbox/status" || fail 'Status did not show the actual collection window'
 ! grep -q '^forbidden ' "$RECORD" 2>/dev/null || fail 'Onboarding scenarios reached a GUI or model command'
 echo 'PASS: 격리된 Git 다중 위치·소스 상태/설정·로컬 자정 기간·프로젝트/표지 렌더'

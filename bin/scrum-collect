@@ -58,8 +58,10 @@ to_epoch() {
 }
 iso_at() { date -u -r "$1" '+%Y-%m-%dT%H:%M:%SZ'; }
 now_epoch=$(to_epoch "${ROUTINE_NOW:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}") || { echo 'Invalid ROUTINE_NOW' >&2; exit 2; }
+window_info='{"limited":false,"notices":[]}'
 if [[ -z $since_arg ]]; then
-  since_arg=$(routine_collect_since "$(date -r "$now_epoch" '+%Y-%m-%d')")
+  window_info=$(routine_collect_window "$(date -r "$now_epoch" '+%Y-%m-%d')")
+  since_arg=$(command jq -r '.since' <<< "$window_info")
 fi
 since_epoch=$(to_epoch "$since_arg") || { echo 'Invalid --since' >&2; exit 2; }
 until_epoch=$now_epoch
@@ -490,9 +492,9 @@ for source in "${requested[@]}"; do
 done
 ((selected > 0)) || { echo 'No sources selected' >&2; exit 2; }
 if [[ -f $work/errors.rows ]]; then jq -s '.' "$work/errors.rows" > "$work/errors.json"; fi
-jq -n --arg since "$since" --arg until "$until" --arg tz "$TZ" --arg generated_at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --argjson slack_success "$slack_success" \
+jq -n --arg since "$since" --arg until "$until" --arg tz "$TZ" --arg generated_at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --argjson slack_success "$slack_success" --argjson window_info "$window_info" \
   --slurpfile git "$work/git.json" --slurpfile prs "$work/prs.json" --slurpfile sessions "$work/sessions.json" --slurpfile claude "$work/claude_sessions.json" --slurpfile jira "$work/jira.json" --slurpfile notion "$work/notion.json" --slurpfile slack "$work/slack.json" --slurpfile errors "$work/errors.json" \
-  '{version:1,window:{since:$since,until:$until,tz:$tz},generated_at:$generated_at,sources:{slack:$slack_success},git:$git[0],prs:$prs[0],sessions:($sessions[0]+$claude[0]),jira:$jira[0],notion:$notion[0],slack:$slack[0],errors:$errors[0]}' > "$work/result.raw.json"
+  '{version:1,window:{since:$since,until:$until,tz:$tz,limited:$window_info.limited,max_days:$window_info.max_days,notices:$window_info.notices},generated_at:$generated_at,sources:{slack:$slack_success},git:$git[0],prs:$prs[0],sessions:($sessions[0]+$claude[0]),jira:$jira[0],notion:$notion[0],slack:$slack[0],errors:$errors[0]}' > "$work/result.raw.json"
 jq -L "$work" '
   include "redact";
   .git |= map(.repo |= redact | .subject |= redact) |

@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2154 # share_dir is supplied by the routine entrypoint.
 routine_next_schedule() {
-  local today epoch offset candidate weekday clock now stamp
+  local today now clock stamp first_offset
   today=$(routine_day); now=$(date +%s)
   if [[ -n ${ROUTINE_NOW:-} ]]; then
     stamp=${ROUTINE_NOW/Z/+0000}; stamp=$(printf '%s' "$stamp" | sed -E 's/([+-][0-9]{2}):([0-9]{2})$/\1\2/')
     now=$(date -j -f '%Y-%m-%dT%H:%M:%S%z' "$stamp" '+%s')
   fi
   clock=$(routine_get morning.time)
-  epoch=$(date -j -f '%Y-%m-%d %H:%M:%S' "$today 12:00:00" '+%s')
-  for offset in 0 1 2 3 4 5 6 7; do
-    candidate=$(date -r "$((epoch+offset*86400))" '+%Y-%m-%d')
-    weekday=$(date -r "$((epoch+offset*86400))" '+%u')
-    jq -e --argjson day "$weekday" '.morning.weekdays|index($day)!=null' <<< "$ROUTINE_SETTINGS" >/dev/null || continue
-    candidate=$(date -j -f '%Y-%m-%d %H:%M:%S' "$candidate $clock:00" '+%s')
-    ((candidate>now)) || continue
-    date -r "$candidate" '+%Y-%m-%d %H:%M %Z'; return
-  done
+  first_offset=0
+  if (( $(date -j -f '%Y-%m-%d %H:%M:%S' "$today $clock:00" '+%s') <= now )); then first_offset=1; fi
+  command jq -L "$share_dir" -nr --arg today "$today" --arg clock "$clock" --argjson offset "$first_offset" --argjson settings "$ROUTINE_SETTINGS" --slurpfile holidays "$share_dir/holidays-kr.json" '
+    include "calendar";
+    ([$settings.calendar.days_off[],(if $settings.calendar.public_holidays=="kr" then $holidays[0].years[]|keys[] else empty end),$today]|max|calendar_epoch) as $last |
+    first(range($offset;($last-($today|calendar_epoch))/86400+8) as $n | ($today|calendar_shift($n)) as $day | calendar_day($day;$settings;$holidays[0]) | select(.scheduled and .workday)) as $next |
+    ([range($offset;60) as $n | ($today|calendar_shift($n)) as $day | calendar_day($day;$settings;$holidays[0]) | select(.scheduled and (.workday|not))][0] // null) as $skip |
+    "\($next.day)(\(["","월","화","수","목","금","토","일"][$next.weekday])) \($clock)"+
+    (if $skip!=null then " — \($skip.day[5:]) \($skip.reason|ltrimstr("공휴일 ")) 건너뜀" else "" end)'
 }
 routine_disk_access_report() {
   local result="$HOME/Library/Application Support/routine-automation/.setup-first-run-result.json" status=unverified
@@ -31,6 +31,10 @@ routine_status() {
   local day out log marker source agent label status_manifest
   day=$(routine_day); out="$HOME/Library/Application Support/routine-automation/scrum/$day"; log="$HOME/Library/Logs/routine-automation/morning-$day.log"
   printf '오늘: %s\n' "$day"
+  printf '공휴일: %s\n' "$(routine_calendar_label)"
+  routine_calendar_warning "$day"
+  if [[ -f $out.json ]]; then command jq -r '.window.notices[]?' "$out.json"
+  else routine_collect_window "$day" | command jq -r '.notices[]|select(startswith("수집 기간을"))'; fi
   if [[ -f $out.json ]]; then
     jq -r '"수집 기간: \(.window.since) ~ \(.window.until) (\(.window.tz // "시스템 시간대"), 상한 제외)","수집:",(["git","prs","jira","notion","slack"][] as $s|"  \($s): \(.[$s]|length)건"),"  omp_sessions: \([.sessions[]?|select(.source!="claude")]|length)건","  claude_sessions: \([.sessions[]?|select(.source=="claude")]|length)건",(.errors[]?|"  오류 [\(.source)]: \(.message)")' "$out.json"
   else echo '수집: 미실행'; fi

@@ -167,12 +167,7 @@ routine_learn() (
   done
   today=$(routine_day)
   yesterday=$(date -j -v-1d -f '%Y-%m-%d %H:%M:%S' "$today 12:00:00" '+%Y-%m-%d')
-  if [[ -z $day ]]; then
-    day=$yesterday
-    while [[ $(date -j -f '%Y-%m-%d %H:%M:%S' "$day 12:00:00" '+%u') -gt 5 ]]; do
-      day=$(date -j -v-1d -f '%Y-%m-%d %H:%M:%S' "$day 12:00:00" '+%Y-%m-%d')
-    done
-  fi
+  [[ -n $day ]] || day=$(routine_collect_since "$today")
   [[ $day =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo '날짜는 YYYY-MM-DD 형식이어야 합니다.' >&2; return 2; }
   midnight=$(date -j -f '%Y-%m-%d %H:%M:%S' "$day 00:00:00" '+%s' 2>/dev/null) || { echo '유효하지 않은 날짜입니다.' >&2; return 2; }
   [[ $(date -r "$midnight" '+%Y-%m-%d') == "$day" ]] || { echo '유효하지 않은 날짜입니다.' >&2; return 2; }

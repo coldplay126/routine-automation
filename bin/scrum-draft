@@ -54,7 +54,6 @@ status=0 target_tmp=''
 trap 'status=$?; if [[ -n $target_tmp ]]; then rm -f -- "$target_tmp"; fi; rm -rf -- "$work"; exit "$status"' EXIT
 input="$out/$day.json"
 if [[ ! -f $input ]]; then
-  since=$(routine_collect_since "$day")
   collect_now=${ROUTINE_NOW:-$(date '+%Y-%m-%dT%H:%M:%S%z')}
   if [[ $day != $(routine_day) ]]; then
     collect_now=$(date -j -f '%Y-%m-%d %H:%M:%S' "$day 23:59:59" '+%Y-%m-%dT%H:%M:%S%z')
@@ -62,7 +61,7 @@ if [[ ! -f $input ]]; then
   sources=$(routine_sources)
   if ((no_llm)); then sources=$(printf '%s' "$sources" | sed -E 's/(^|,)prs(,|$)/\1/;s/,$//'); fi
   # No GUI source is enabled during unattended collection.
-  ROUTINE_NOW="$collect_now" ROUTINE_ALLOW_GUI=0 "$script_dir/scrum-collect" --since "$since" --sources "$sources" --out "$out" || [[ -f $input ]]
+  ROUTINE_NOW="$collect_now" ROUTINE_ALLOW_GUI=0 "$script_dir/scrum-collect" --sources "$sources" --out "$out" || [[ -f $input ]]
 fi
 jq '. + {errors:(.errors // []),slack:(.slack // [])} | .sessions |= ((. // [])|to_entries|map(.value + {id:(.value.id // ("legacy-"+(.key|tostring)))}))' "$input" > "$work/evidence.json"
 if ((slack)); then

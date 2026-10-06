@@ -54,7 +54,7 @@ case "$1 ${2:-}" in
   'api user') echo '{"id":42,"login":"fixture"}'; exit ;;
   'pr view') echo '{"state":"OPEN","title":"Current PR","baseRefName":"main","author":{"login":"fixture"},"createdAt":"2026-09-24T01:00:00Z","mergedAt":null,"closedAt":null,"commits":[{"authoredDate":"2026-09-25T01:00:00Z","authors":[{"login":"fixture"}]}],"reviews":[],"comments":[]}'; exit ;;
 esac
-case " $* " in *' --updated=>=2026-09-24T15:00:00Z '*) ;; *) exit 3 ;; esac
+case " $* " in *' --updated=>=2026-09-22T15:00:00Z '*) ;; *) exit 3 ;; esac
 title='First PR'
 [[ ${GH_SECRET:-0} == 1 ]] && title='github_pat_prSecret98765432109876543210'
 case " $* " in
@@ -143,7 +143,7 @@ shasum -a 256 "$ROUTINE_CHROME_DIR/Default/History" "$ROUTINE_NOTION_DB" > "$san
 out="$sandbox/out"
 "$repo/bin/scrum-collect" --out "$out"
 result="$out/2026-09-28.json"
-jq -e '.version == 1 and .window.since == "2026-09-24T15:00:00Z" and (.git | length) == 2 and .git[0].repo == "project" and (.git | all(.rebased == false)) and (.prs | length) == 1 and .prs[0].roles == ["author","commenter","reviewed-by"] and (.sessions | length) == 1 and [.sessions[0].user_messages[].text] == ["Reviewed sprint scope","Newer mirror message"] and (.jira | length) == 2 and (.jira[0].url | contains("?secret") | not) and (.notion | length) == 1 and .notion[0].count == 2 and .notion[0].page_title == "Weekly planning" and .errors == []' "$result" >/dev/null || fail 'Baseline collection contract'
+jq -e '.version == 1 and .window.since == "2026-09-22T15:00:00Z" and (.git | length) == 3 and any(.git[];.repo == "project") and (.git | all(.rebased == false)) and any(.git[];.subject=="Outside window") and (.prs | length) == 1 and .prs[0].roles == ["author","commenter","reviewed-by"] and (.sessions | length) == 1 and [.sessions[0].user_messages[].text] == ["Out of window","Reviewed sprint scope","Newer mirror message"] and (.jira | length) == 2 and (.jira[0].url | contains("?secret") | not) and (.notion | length) == 1 and .notion[0].count == 3 and .notion[0].page_title == "Weekly planning" and .errors == []' "$result" >/dev/null || fail 'Baseline collection contract (추석 연휴 전 직전 근무일)'
 grep -Fq "$TMPDIR/scrum-collect." "$SQLITE_RECORD" || fail 'Collector bypassed copied-database guard'
 [[ $(stat -f %Lp "$out") == 700 && $(stat -f %Lp "$result") == 600 ]] || fail 'Output permissions'
 [[ -f "$out/2026-09-28.md" ]] || fail 'Missing Markdown'
@@ -218,7 +218,7 @@ shasum -a 256 "$sandbox/wal/notion.db" "$sandbox/wal/notion.db-wal" > "$sandbox/
 for backend in backup copy; do
   force_copy=0; [[ $backend != copy ]] || force_copy=1
   SQLITE_FORCE_COPY=$force_copy ROUTINE_NOTION_DB="$sandbox/wal/notion.db" "$repo/bin/scrum-collect" --out "$out" --sources notion
-  jq -e '.notion == [{"last_edited_ts":"2026-09-25T06:00:00Z","count":3,"page_title":"Weekly planning"}] and .errors == []' "$result" >/dev/null || { jq '{notion,errors}' "$result" >&2; fail "WAL-only edit missing: $backend"; }
+  jq -e '.notion == [{"last_edited_ts":"2026-09-25T06:00:00Z","count":4,"page_title":"Weekly planning"}] and .errors == []' "$result" >/dev/null || { jq '{notion,errors}' "$result" >&2; fail "WAL-only edit missing: $backend"; }
   shasum -a 256 "$sandbox/wal/notion.db" "$sandbox/wal/notion.db-wal" > "$sandbox/wal.after"
   cmp -s "$sandbox/wal.before" "$sandbox/wal.after" || fail "Original WAL database or log was changed: $backend"
 done
@@ -259,7 +259,7 @@ corrupt="$sandbox/corrupt.db"; printf 'not a database' > "$corrupt"
 if snapshot_sqlite "$corrupt" "$sandbox/corrupt-snap.db"; then fail 'Corrupt source produced a snapshot'; fi
 [[ ! -e $SQLITE_RECORD.guard ]] || fail 'Collector attempted a writable SQLite open of an original'
 GH_FAIL=1 "$repo/bin/scrum-collect" --out "$out" --sources git,prs
-jq -e '(.errors|map(.source))==["prs"] and (.git | length) == 2 and .prs == []' "$result" >/dev/null || fail 'Source failure isolation'
+jq -e '(.errors|map(.source))==["prs"] and (.git | length) == 3 and .prs == []' "$result" >/dev/null || fail 'Source failure isolation'
 if GH_FAIL=1 "$repo/bin/scrum-collect" --out "$out" --sources prs >/dev/null 2>&1; then echo 'Expected all-sources-failed exit' >&2; exit 1; fi
 ROUTINE_NOW='2026-09-28T12:00:00+09:00' "$repo/bin/scrum-collect" --out "$out" --since 2026-09-27 --sources notion
 jq -e '.notion == [] and .errors == []' "$result" >/dev/null || fail 'Empty Notion results'
@@ -288,7 +288,7 @@ cat > "$ROUTINE_OMP_SESSIONS/one/broken.jsonl" <<'SESSION'
 {"type":"message","timestamp":"2026-09-25T08:02:00Z","message":{"role":"user","content":"  <system_notice>Injected"}}
 SESSION
 "$repo/bin/scrum-collect" --out "$out" --sources git,sessions
-jq -e '(.git | length) == 2 and (.sessions | length) == 2 and (any(.sessions[]; any(.user_messages[]; .text == "Valid line after damage"))) and (all(.sessions[].user_messages[].text; contains("Injected") | not)) and (any(.errors[]; .source == "git" and (.message | contains("broken:")))) and (any(.errors[]; .source == "git" and (.message | contains("denied: Operation not permitted"))))' "$result" >/dev/null || fail 'Broken worktree or JSONL isolation'
+jq -e '(.git | length) == 3 and (.sessions | length) == 2 and (any(.sessions[]; any(.user_messages[]; .text == "Valid line after damage"))) and (all(.sessions[].user_messages[].text; contains("Injected") | not)) and (any(.errors[]; .source == "git" and (.message | contains("broken:")))) and (any(.errors[]; .source == "git" and (.message | contains("denied: Operation not permitted"))))' "$result" >/dev/null || fail 'Broken worktree or JSONL isolation'
 for leftover in "$TMPDIR"/scrum-collect.*; do [[ ! -e $leftover ]] || fail 'Collector left temporary files after partial failure'; done
 printf 'rebased\n' >> "$ROUTINE_REPO_ROOT/one/changes"
 git -C "$ROUTINE_REPO_ROOT/one" add changes
@@ -311,7 +311,7 @@ SQL
 INSERT INTO block VALUES ('secret-page',NULL,'page','{"title":[["token=notionSecret987"]]}',(unixepoch('2026-09-25 03:00:00')*1000),'me');
 SQL
 GH_SECRET=1 "$repo/bin/scrum-collect" --out "$out"
-jq -e '(.git | length) == 4 and (any(.git[]; .rebased == true and (.author_ts | startswith("2026-09-10")))) and (.sessions | length) == 3 and (.jira | length) == 5 and (any(.jira[]; .key == "NULL-7" and .title == "")) and (all(.jira[].key; . != "UTF-8")) and (.notion | length) == 2 and .errors != []' "$result" >/dev/null || fail 'Redacted activity contract'
+jq -e '(.git | length) == 5 and (any(.git[]; .rebased == true and (.author_ts | startswith("2026-09-10")))) and (.sessions | length) == 3 and (.jira | length) == 5 and (any(.jira[]; .key == "NULL-7" and .title == "")) and (all(.jira[].key; . != "UTF-8")) and (.notion | length) == 2 and .errors != []' "$result" >/dev/null || fail 'Redacted activity contract'
 for secret in ASIAPRESIGNED0001 presignedToken987 presignedSig987 jsonsecret001 awssecret001 AKIAABCDEFGHIJKLMNOP AKIAIOSFO github_pat_example123 github_pat_prSecret987 xoxb-example123 ATATTexample123 eyJheader.eyJpayload.signature123 person:pass123@ titleSecret987 notionSecret987 jiraSecret987 pw123 ghp_example123 sk-ant-example123 PEMBODYLEAK123 PEMBODYWITHOUTEND321 '-----BEGIN OPENSSH PRIVATE KEY-----' '-----BEGIN RSA PRIVATE KEY-----'; do
   if grep -Fq -- "$secret" "$result" "$out/2026-09-28.md"; then fail "Secret leaked: $secret"; fi
 done
@@ -383,6 +383,7 @@ if OMP_TIMEOUT=1 "$repo/bin/morning" --only omp-update > "$sandbox/timed-out"; t
 if OMP_TIMEOUT=137 "$repo/bin/morning" --only omp-update > "$sandbox/killed-timeout"; then fail 'Forced timeout reported success'; fi
 [[ $(cat "$sandbox/killed-timeout") == *'omp-update:fail(timeout, '*'exit 137)'* ]] || fail 'Forced timeout not distinguished'
 
+"$repo/tests/calendar.sh"
 "$repo/tests/scrum.sh"
 "$repo/tests/team-package.sh"
 "$repo/tests/update.sh"

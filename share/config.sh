@@ -22,7 +22,7 @@ routine_load_config() {
         sources.git.roots)
           if [[ $env == ROUTINE_REPO_ROOT ]]; then value=$(command jq -nc --arg v "$value" '[$v]')
           else command jq empty <<< "$value" >/dev/null || { echo "환경 변수 JSON 오류: $env" >&2; return 2; }; fi ;;
-        *.enabled|morning.extra_steps.*|delivery.idle_seconds|delivery.daily_attempts|morning.weekdays|draft.categories) command jq empty <<< "$value" >/dev/null || { echo "환경 변수 JSON 오류: $env" >&2; return 2; } ;;
+        *.enabled|morning.extra_steps.*|delivery.idle_seconds|delivery.daily_attempts|morning.weekdays|draft.categories|collect.max_days|calendar.days_off|calendar.work_days) command jq empty <<< "$value" >/dev/null || { echo "환경 변수 JSON 오류: $env" >&2; return 2; } ;;
         *) value=$(command jq -nc --arg v "$value" '$v') ;;
       esac
       ROUTINE_SETTINGS=$(command jq -c --arg key "$key" --argjson value "$value" 'setpath($key|split(".");$value)' <<< "$ROUTINE_SETTINGS") || return 2
@@ -48,6 +48,10 @@ ROUTINE_LLM_MODEL draft.llm.model
 ROUTINE_REPO_ROOT sources.git.roots
 ROUTINE_GIT_ROOTS sources.git.roots
 ROUTINE_COLLECT_UNTIL collect.until
+ROUTINE_COLLECT_MAX_DAYS collect.max_days
+ROUTINE_PUBLIC_HOLIDAYS calendar.public_holidays
+ROUTINE_DAYS_OFF calendar.days_off
+ROUTINE_WORK_DAYS calendar.work_days
 ROUTINE_GIT_ENABLED sources.git.enabled
 ROUTINE_PRS_ENABLED sources.prs.enabled
 ROUTINE_OMP_SESSIONS sources.omp_sessions.dir
@@ -124,8 +128,8 @@ routine_day() {
     date -j -f '%Y-%m-%dT%H:%M:%S%z' "$stamp" '+%Y-%m-%d'
   else date '+%Y-%m-%d'; fi
 }
+# shellcheck source=../share/calendar.sh
+source "$share_dir/calendar.sh"
 routine_collect_since() {
-  local day=$1 days=1
-  [[ $(date -j -f '%Y-%m-%d %H:%M:%S' "$day 12:00:00" '+%u') != 1 ]] || days=3
-  date -j "-v-${days}d" -f '%Y-%m-%d %H:%M:%S' "$day 12:00:00" '+%Y-%m-%d'
+  routine_collect_window "$1" | command jq -r '.since'
 }

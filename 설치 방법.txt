@@ -47,7 +47,7 @@ asset 업로드 상태·정확한 URL·크기·SHA-256 digest·태그와 VERSION
 Downloads는 경로·sha256·quarantine·다운로드 출처를 표시하고 TTY에서 확인해야 합니다. --yes여도 확인하며 비TTY 설치는 거부합니다.
 --check는 설치 없이 출처를 확인할 수 있습니다. Downloads 검증은 파일 상태별 캐시와 15초 전체 탐색 상한을 사용합니다.
 새 zip 설치 전 현재 버전 → 새 버전과 변경 내역이 표시됩니다.
-같거나 낮은 버전은 설치하지 않습니다. 롤백 절차는 README.md에 있습니다.
+같거나 낮은 버전은 설치하지 않습니다. 롤백 절차는 docs/install.md에 있습니다.
 사용자가 받은 zip은 그대로 남고, GitHub에서 받은 임시 zip은 종료 시 정리합니다.
 압축을 푼 폴더는 자동 업데이트 후보가 아닙니다.
 설정은 기존 설치 기록의 경로를 유지합니다. 명시한 ROUTINE_CONFIG가 다르면 중단합니다.
@@ -65,4 +65,4 @@ status와 아침 알림은 공개 GitHub 버전만 하루 한 번 조회·캐시
 Apple 공식 안내: https://support.apple.com/102445
 미검증 범위: 실제 공개 Release 다운로드, Finder/Archive Utility의 격리 전파와
 더블클릭 차단·예외 버튼, 실제 launchd/TCC 권한과 조직별 Slack 화면은
-격리 테스트만으로 보장하지 않습니다. 자세한 한계는 README.md와 CHANGELOG.md를 확인하세요.
+격리 테스트만으로 보장하지 않습니다. 설치·복구는 docs/install.md, 한계는 docs/safety.md와 CHANGELOG.md를 확인하세요.

@@ -247,6 +247,7 @@ if (( !non_interactive )); then
     delivery='클립보드 (clipboard)'
     [[ $(routine_get delivery.mode) != gui-paste ]] || delivery='Slack 자동 붙여넣기 (gui-paste, 전송 안 함)'
     summary_row '전달 방식' "$delivery"
+    summary_row '공휴일' "$(routine_calendar_label)"
     if ((full)); then
       weekdays=$(command jq -r '.morning.weekdays|map(["","월","화","수","목","금","토","일"][.])|join("·")' <<< "$ROUTINE_SETTINGS")
       summary_row '예약 시각' "$weekdays $(routine_get morning.time) / $(routine_get timezone)"

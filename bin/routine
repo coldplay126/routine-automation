@@ -9,7 +9,7 @@ share_dir="$script_dir/../share"
 # shellcheck source=../share/config.sh
 source "$share_dir/config.sh"
 usage() {
-  echo 'routine <setup|init|doctor|status|sources|run|collect|draft|review|style|learn|paste|copy|config|update|package|uninstall>'
+  echo 'routine <setup|init|doctor|status|sources|off|work|run|collect|draft|review|style|learn|paste|copy|config|update|package|uninstall>'
   echo 'routine --set dotted.key JSON <cmd> (CLI > ROUTINE_* > 설정 > 기본값)'
 }
 # Transient CLI overrides are applied after environment/config loading.
@@ -45,17 +45,22 @@ if [[ ${1:-} == -h || ${1:-} == --help ]]; then
     doctor) echo 'routine doctor — 읽기 전용 상태 점검' ;;
     status) echo 'routine status — 상태 점검·공개 Release 하루 1회 조회/0600 캐시 포함 (Downloads 탐색·설치 없음)' ;;
     sources) echo 'routine sources [enable|disable git|prs|omp_sessions|claude_sessions|jira|notion|slack]' ;;
+    off) echo 'routine off [날짜|날짜~날짜|today|tomorrow] [메모] | off --remove 날짜|범위 — 앞으로 60일 목록/개인 휴무' ;;
+    work) echo 'routine work <날짜|today> | work --remove 날짜 — 예외 근무일 지정' ;;
     config) echo 'routine config get KEY | set KEY JSON' ;;
     package) echo 'routine package — 깨끗한 Git HEAD를 zip으로 배포' ;;
     *) usage >&2; exit 2 ;;
   esac
   exit 0
 fi
-if [[ $cmd == sources || ( $cmd == config && ${1:-} == set ) ]]; then routine_load_config file; else routine_load_config; fi
+if [[ $cmd == off || $cmd == work ]]; then routine_load_config persisted
+elif [[ $cmd == sources || ( $cmd == config && ${1:-} == set ) ]]; then routine_load_config file
+else routine_load_config; fi
 case $cmd in
   run|collect|draft|review|learn|paste|copy) routine_require_config ;;
 esac
 case $cmd in
+  off|work) routine_manage_calendar "$cmd" "$@" ;;
   run) /bin/bash "$script_dir/morning" "$@" ;;
   collect) "$script_dir/scrum-collect" "$@" ;;
   draft) "$script_dir/scrum-draft" "$@" ;;

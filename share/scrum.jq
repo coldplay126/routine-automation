@@ -157,7 +157,7 @@ def validate_draft($source;$notes):
   ($source|evidence_catalog($notes)) as $catalog |
   {items:.items,settings:draft_settings,
    evidence_catalog:($catalog|map({id:(.id|redact),kind,text:(.text|redact|.[0:300])})),
-   questions:[$source.prs[]?|select(has("in_window")|not)|"이전 버전 PR 근거 — 다시 routine collect 필요: "+.url]} |
+   questions:([$source.prs[]?|select(has("in_window")|not)|"이전 버전 PR 근거 — 다시 routine collect 필요: "+.url]+($source.window.notices // []))} |
   reduce range(0;.items|length) as $i (. ;
     .items[$i] as $item |
     [$item.evidence[] as $id|$catalog[]|select(.id==$id)] as $all_proof |

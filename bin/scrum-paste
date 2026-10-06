@@ -26,6 +26,10 @@ while (($#)); do
   shift
 done
 if ((auto && (force || replace))); then echo '--auto는 --force/--replace와 함께 사용할 수 없습니다.' >&2; exit 2; fi
+if ((auto)); then
+  nonwork_reason=$(routine_workday_reason "$(routine_day)")
+  [[ -z $nonwork_reason ]] || exit 0
+fi
 if ((auto)) && [[ $(routine_get delivery.mode) != gui-paste ]]; then
   echo 'clipboard 전달: 자동 붙여넣기 없음'
   exit 0
@@ -159,10 +163,8 @@ terminal() {
 fail() { failure_reason=$1; echo "$failure_reason" >&2; exit 1; }
 if ((auto)); then
   retain_recent_state
-  weekday=$(date -r "$now" '+%u')
   clock=$(date -r "$now" '+%H%M')
   [[ ! -e "$HOME/Library/Application Support/routine-automation/autopaste.disabled" ]] || skip_auto '자동 붙여넣기 비활성화'
-  jq -e --argjson day "$weekday" '.morning.weekdays|index($day)!=null' <<< "$ROUTINE_SETTINGS" >/dev/null || skip_auto '예약 요일 아님'
   has_marker && skip_auto '오늘 완료 또는 종결 표지'
   if ((10#$clock > 10#$window_end)); then
     notify_once deadline '자동 붙여넣기 실패 — routine paste 실행' >/dev/null 2>&1

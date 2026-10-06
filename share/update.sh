@@ -290,7 +290,7 @@ routine_update() (
   if ((pending && check)); then echo '확인만 완료 — 미완료 설치 복구는 아직 실행하지 않았습니다'; return 0; fi
   if ((!pending)) && ! routine_version_newer "$next" "$current"; then
     echo '이미 최신입니다. 같은 버전 또는 낮은 버전은 설치하지 않습니다.'
-    if [[ $next != "$current" ]]; then echo '롤백은 README의 제거 후 이전 패키지 설치 절차를 따르세요.'; fi
+    if [[ $next != "$current" ]]; then echo '롤백은 docs/install.md의 제거 후 이전 패키지 설치 절차를 따르세요.'; fi
     return 0
   fi
   echo '✓ 새 버전 확인'
