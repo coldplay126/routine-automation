@@ -852,7 +852,7 @@ ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-paste" --no-draft > "$sandbox/manual-paste"
 # replies no longer require traversal. Exact author/channel/root comparisons matter.
 for mode in search-own search-own-incomplete search-other search-other-author search-unknown-author search-incomplete search-fail search-format search-bad-url search-root-changed partial partial-own partial-nonempty; do
   auto_reset
-  if [[ $mode == search-incomplete || $mode == search-fail || $mode == search-format || $mode == search-bad-url ]]; then rm -rf -- "$capture_dir"; fi
+  if [[ $mode == search-incomplete || $mode == search-fail || $mode == search-format || $mode == search-bad-url || $mode == search-other-author || $mode == search-unknown-author ]]; then rm -rf -- "$capture_dir"; fi
   AUTO_SELF_RESET=1 PASTE_MODE=$mode run_auto
   [[ $(cat "$STAGE.query") == 'from:me in:#daily-scrum on:2026-09-28' ]] || fail "Wrong duplicate search query: $mode"
   ! grep -Eq 'computer scroll|press-key|--element-index (99|100)' "$CALLS" || fail 'Duplicate check scrolled or sent a message'
@@ -862,7 +862,8 @@ for mode in search-own search-own-incomplete search-other search-other-author se
       [[ $auto_code == 3 && -f $out/2026-09-28.paste-skipped && ! -e $out/2026-09-28.pasted ]] || fail 'Search missed off-screen own reply'
       grep -Fq 'reason=이미 본인 댓글이 있습니다' "$out/2026-09-28.paste-skipped" || fail 'Search duplicate reason missing'
       ! grep -Eq 'hotkey|click .*--element-index (31|61)' "$CALLS" || fail 'Duplicate search opened thread or pasted' ;;
-    search-other|search-other-author|search-unknown-author|partial)
+    # A from:me result whose author is unreadable or different is a read failure, not "no own reply".
+    search-other|partial)
       [[ $auto_code == 0 && -f $out/2026-09-28.pasted ]] || fail "Unrelated search result prevented safe paste: $mode"
       grep -q 'click .*--element-index 61 ' "$CALLS" || fail 'Search did not re-identify the changed reply index'
       grep -q 'click .*--element-index 6 ' "$CALLS" || fail 'Search query not cleared'
@@ -873,7 +874,7 @@ for mode in search-own search-own-incomplete search-other search-other-author se
     *)
       [[ $auto_code == 1 && ! -e $out/2026-09-28.pasted ]] || fail "Unverifiable search/root accepted: $mode"
       ! grep -Eq 'hotkey|click .*--element-index (31|61)' "$CALLS" || fail 'Failed search/root opened thread or pasted'
-      if [[ $mode != search-root-changed ]]; then
+      if [[ $mode != search-root-changed && $mode != search-other-author && $mode != search-unknown-author ]]; then
         captures=("$capture_dir"/[0-9]*-[0-9]*-[0-9]*.txt)
         grep -q '^# routine 검색/' "${captures[@]}" || fail 'Search failure did not save masked diagnostic'
         ! grep -Eq '테스트_사용자|기존 댓글|내 댓글 본문|from:@' "${captures[@]}" || fail 'Search diagnostic leaked author/body/query'

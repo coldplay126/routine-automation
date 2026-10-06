@@ -110,10 +110,15 @@ def search_report:
   if $empty and ($items|length)>0 then error("검색 결과의 빈 상태가 모순됩니다")
   elif ($items|length)==0 and ($empty|not) then error("검색 결과/빈 상태를 확인하지 못했습니다")
   else {items:$items,total:(if $empty then 0 elif ($counts|length)==1 then $counts[0] else null end)} end;
+# The query is from:me, so every result must read as the configured author. An unreadable or
+# different author is a read failure (stop), never "no own reply".
 def search_has_own_reply($ts):
   ($ARGS.named.routine.identity.slack_display_name // "") as $name |
   ($ARGS.named.routine.slack.channel_id // "") as $channel |
-  [.items[]|select(.author==$name and $name!="")|
+  if $name=="" then error("표시 이름 설정이 없어 검색 결과 작성자를 확인할 수 없습니다")
+  elif any(.items[]; .author!=$name) then error("검색 결과 작성자를 확인하지 못했습니다")
+  else
+  [.items[]|
     ([.url|capture("^https?://[^/]+/archives/(?<channel>[CGD][A-Z0-9]+)/p[0-9]{16}(?:\\?(?<query>[^#]+))?$")][0]) as $url |
     if $url==null then {duplicate:false,valid:false}
     elif $url.channel!=$channel then {duplicate:false,valid:true}
@@ -124,7 +129,7 @@ def search_has_own_reply($ts):
   if any($matches[];.duplicate) then true
   elif any($matches[];.valid|not) then error("검색 결과 메시지 URL/thread_ts를 해석하지 못했습니다")
   elif .total==null or .total!=(.items|length) then error("전체 검색 결과를 확인하지 못했습니다")
-  else false end;
+  else false end end;
 def scrum_blocks_for($dates):
   ax_lines as $lines |
   [range(0;$lines|length) as $heading | select(slack_settings.post_title|length>0) | select($lines[$heading].body|contains(slack_settings.post_title)) |
