@@ -172,15 +172,23 @@ case $2 in
         [[ ${SEARCH_MODE:-} != empty ]] || tree='' ;;
       channel|reveal)
         day=오늘; [[ ${PASTE_MODE:-} == old ]] && day=어제
-        tree="[30] container, Text: 스크럼-예제팀: 예제팀"$'\n'"[32] link [$day, 오전 8:00:01](https://slack.example/today)"
-        if [[ ${PASTE_MODE:-} == scrolled* ]]; then tree=${tree//https:\/\/slack.example\/today/https:\/\/slack.example\/archives\/C1\/p1790895609247049}; fi
-        if [[ ${PASTE_MODE:-} == zero || ${PASTE_MODE:-} == no-reply ]]; then
-          if [[ $stage == reveal && ${PASTE_MODE:-} == zero ]]; then tree+=$'\n[33] 버튼 스레드에서 답장'; fi
-        else tree+=$'\n[31] 버튼 2개의 댓글'; fi
-        if [[ ${PASTE_MODE:-} == multi ]]; then tree+=$'\n[50] container, Text: 스크럼-예제팀: 예제팀\n[51] link [오늘, 오전 8:02:01](https://slack.example/other)\n[52] 버튼 5개의 댓글'; fi
+        if [[ ${PASTE_MODE:-} == workflow ]]; then
+          # Workflow posts repeat the title as an author button, and Slack's hover action now reads
+          # "스레드의 댓글": both must resolve to the single post and its reply action.
+          tree=$'[30] container 스크럼-예제팀: 예제팀 일일 업무\n\t[34] container\n\t\t[35] 버튼 스크럼-예제팀\n\t\t[36] 텍스트, Value: 워크플로\n\t\t[32] link [오늘, 오전 8:00:01](https://slack.example/today)\n\t\t[37] container, Text: 예제팀 일일 업무'
+          [[ $stage != reveal ]] || tree+=$'\n\t\t[38] container 메시지 작업\n\t\t\t[33] 버튼 스레드의 댓글'
+        else
+          tree="[30] container, Text: 스크럼-예제팀: 예제팀"$'\n'"[32] link [$day, 오전 8:00:01](https://slack.example/today)"
+          if [[ ${PASTE_MODE:-} == scrolled* ]]; then tree=${tree//https:\/\/slack.example\/today/https:\/\/slack.example\/archives\/C1\/p1790895609247049}; fi
+          if [[ ${PASTE_MODE:-} == zero || ${PASTE_MODE:-} == no-reply ]]; then
+            if [[ $stage == reveal && ${PASTE_MODE:-} == zero ]]; then tree+=$'\n[33] 버튼 스레드에서 답장'; fi
+          else tree+=$'\n[31] 버튼 2개의 댓글'; fi
+          if [[ ${PASTE_MODE:-} == multi ]]; then tree+=$'\n[50] container, Text: 스크럼-예제팀: 예제팀\n[51] link [오늘, 오전 8:02:01](https://slack.example/other)\n[52] 버튼 5개의 댓글'; fi
+        fi
         tree+=$'\n[39] container, Text: 공지\n[53] link [오늘, 오전 9:00:01](https://slack.example/notice)\n[52] 버튼 5개의 댓글' ;;
       thread|focused)
         tree=$'[40] container, Text: daily-scrum 채널의 스레드\n[45] container, Text: 스크럼-예제팀: 예제팀\n[46] link [오늘, 오전 8:03:01](https://slack.example/today)\n[42] 내용 목록 daily-scrum의 스레드 (채널)'
+        [[ ${PASTE_MODE:-} != workflow ]] || tree=${tree/$'\n[46]'/$'\n[49] 버튼 스크럼-예제팀\n[46]'}
         [[ ${PASTE_MODE:-} != wrong-root ]] || tree=$'[40] container, Text: daily-scrum 채널의 스레드\n[45] container, Text: 공지\n[46] link [오늘, 오전 9:00:01](https://slack.example/notice)'
         polls=$(cat "$STAGE.polls" 2>/dev/null || echo 0); polls=$((polls+1)); echo "$polls" > "$STAGE.polls"
         if [[ ${PASTE_MODE:-} == loading && $polls -le 2 || ${PASTE_MODE:-} == never-ready ]]; then tree='[40] container, Text: 스레드 불러오는 중'; fi
@@ -476,12 +484,12 @@ if SEARCH_MODE=never-search ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-collect" --sour
 "$repo/bin/scrum-draft" --date 2026-09-28 --out "$sandbox/local-only" --no-llm
 [[ ! -s $CALLS ]] || fail 'Missing JSON local mode called external tools'
 # The paste path backs up and restores even when paste or screenshot fails.
-for mode in normal zero loading fail-v screenshot-fail; do
+for mode in normal zero workflow loading fail-v screenshot-fail; do
   printf 'original clipboard\n' > "$CLIPBOARD"; cp "$CLIPBOARD" "$sandbox/original"
   : > "$CALLS"
   require_gui_stubs
   if PASTE_MODE=$mode ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-paste" --no-draft > "$sandbox/paste-output" 2> "$sandbox/paste-error"; then
-    [[ $mode == normal || $mode == zero || $mode == loading ]] || fail 'Expected paste failure'
+    [[ $mode == normal || $mode == zero || $mode == workflow || $mode == loading ]] || fail 'Expected paste failure'
   else [[ $mode == fail-v || $mode == screenshot-fail ]] || { cat "$sandbox/paste-error" >&2; fail "Paste failed: $mode"; }; fi
   cmp -s "$CLIPBOARD" "$sandbox/original" || fail "Clipboard not restored: $mode"
   ! grep -Eq 'press-key|--element-index (99|100)' "$CALLS" || fail 'Paste sent a key or clicked Send'

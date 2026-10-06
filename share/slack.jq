@@ -2,6 +2,8 @@
 def slack_labels: {search:"버튼 검색",combo:"콤보 상자",editor:"텍스트 엔트리 영역",list:"내용 목록 ",thread_panel:" 채널의 스레드",thread_list:"의 스레드",open_channel:"채널에서 열기",comments:"개의 댓글",user_menu:"팝업 버튼 사용자:",today:"오늘, ",reply:"버튼 스레드에서 답장",broadcast:"(으)로도 전송",toolbar:"도구 막대",search_panel:"검색 결과",search_dialog:"대화상자, Title: 검색"};
 def slack_settings: $ARGS.named.routine.slack // {channel_name:"",post_title:"",post_time_prefix:"오전 8:0"};
 def today_timestamp: contains("link ["+slack_labels.today+slack_settings.post_time_prefix);
+# The hover action that opens a post's thread; Slack has labelled it both ways.
+def reply_action: test("^"+slack_labels.reply+"$") or test("^버튼 스레드의 댓글$");
 def tree_text: .result.snapshot.treeText // .snapshot.treeText // .treeText // error("Missing treeText");
 # Orca prints element indexes as "[12] role" (older) or "12 role" (current).
 def ax_lines:
@@ -75,7 +77,14 @@ def scrum_blocks_for($dates):
    select(($times|length)==1 and ($times[0].body as $body | any($dates[]; . as $date | $body|contains("link ["+$date+", "+slack_settings.post_time_prefix)))) |
    [$block[]|select(.body|test("버튼 [0-9]+"+slack_labels.comments))|.index] as $replies |
    if ($replies|length)>1 then error("같은 글의 댓글 버튼이 여러 개입니다") else
-     {reply:($replies[0] // null),container:$lines[$heading].index,lines:$block} end];
+     {reply:($replies[0] // null),container:$lines[$heading].index,lines:$block,
+      url:($times[0].body|capture("\\((?<url>https?://[^)]+)\\)").url)} end] |
+  # A post's title can match more than one line (the message container and, for workflow posts,
+  # the author button). Matches sharing one permalink are the same post: keep the outermost block.
+  group_by(.url) | map(sort_by(.container) as $same |
+    ([$same[].reply|select(.!=null)]|unique) as $replies |
+    if ($replies|length)>1 then error("같은 글의 댓글 버튼이 여러 개입니다") else
+      $same[0]+{reply:($replies[0] // null)} end) | sort_by(.container) | map(del(.url));
 def scrum_blocks: scrum_blocks_for(["오늘"]);
 def scrum_block: scrum_blocks |
   if length==1 then .[0] else error("오늘 스크럼 글을 하나로 식별하지 못했습니다") end;

@@ -43,7 +43,7 @@ def learn_navigation_safe:
 def learn_reaction_button: test("^버튼 (반응( [^ ]+ [0-9]+)?|이모티콘 추가)$");
 def learn_author_button:
   test("^버튼 ") and
-  (test("^버튼 ([0-9]+개의 댓글|반응( [^ ]+ [0-9]+)?|이모티콘 추가|더보기|메뉴|전송|스레드에서 답장)$")|not);
+  (test("^버튼 ([0-9]+개의 댓글|반응( [^ ]+ [0-9]+)?|이모티콘 추가|더보기|메뉴|전송|스레드에서 답장|스레드의 댓글)$")|not);
 def learn_body_stop:
   test("^(텍스트 엔트리 영역|체크상자|체크박스|체크 상자|checkbox|separator|구분선|날짜 구분선)([, ]|$)|^버튼 전송$|^(container|group|그룹)( |$)";"i");
 # Unknown headers never inherit an author. Only consecutive replies in the same

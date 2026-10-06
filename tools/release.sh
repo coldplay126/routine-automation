@@ -188,12 +188,28 @@ gh auth switch --hostname github.com --user coldplay126 >/dev/null
 [[ $(gh api --hostname github.com "repos/$repository" --jq .id) == 1405988374 ]] || fail '공개 저장소 ID 불일치'
 if ! git -C "$public_root" remote get-url origin >/dev/null 2>&1; then git -C "$public_root" remote add origin "https://github.com/$repository.git"; fi
 git -C "$public_root" push origin refs/heads/main:refs/heads/main "refs/tags/$tag:refs/tags/$tag"
+# The tags endpoint does not serve drafts; read the authenticated list, which includes them.
+release_json() {
+  gh api --hostname github.com "repos/$repository/releases?per_page=100" > "$scratch/releases.json"
+  command jq -c --arg tag "$tag" '[.[]|select(.tag_name==$tag)][0] // empty' "$scratch/releases.json"
+}
+existing=$(release_json)
+if [[ -n $existing ]]; then
+  # A draft left by an interrupted run is replaced; a published (immutable) release never is.
+  command jq -e '.draft==true' <<< "$existing" >/dev/null || fail "이미 공개된 $tag — 새 버전으로 배포하세요"
+  gh release delete "$tag" --repo "$repository" --yes >/dev/null
+fi
 gh release create "$tag" --repo "$repository" --draft --verify-tag --title "$title" --notes-file "$notes" ${release_flags[@]+"${release_flags[@]}"} >/dev/null
 gh release upload "$tag" "$zip" --repo "$repository" >/dev/null
-gh api --hostname github.com "repos/$repository/releases/tags/$tag" > "$scratch/uploaded.json"
+release_json > "$scratch/uploaded.json"
 check_private "$scratch/uploaded.json"
-command jq -e --arg tag "$tag" --arg title "$title" --rawfile body "$notes" --arg name "routine-automation-$version.zip" --arg digest "sha256:$digest" --argjson size "$size" --arg url "https://github.com/$repository/releases/download/$tag/routine-automation-$version.zip" '
+# Draft assets live under an untagged-* path until the release is published.
+command jq -e --arg tag "$tag" --arg title "$title" --rawfile body "$notes" --arg name "routine-automation-$version.zip" --arg digest "sha256:$digest" --argjson size "$size" --arg prefix "https://github.com/$repository/releases/download/untagged-" --arg suffix "/routine-automation-$version.zip" '
   .draft==true and .tag_name==$tag and .name==$title and .body==$body and
-  ([.assets[]|select(.name==$name and .state=="uploaded" and .size==$size and .digest==$digest and .browser_download_url==$url)]|length)==1' "$scratch/uploaded.json" >/dev/null || fail 'draft 제목·노트·asset 업로드 무결성 불일치 — 공개하지 않습니다'
+  ([.assets[]|select(.name==$name and .state=="uploaded" and .size==$size and .digest==$digest and
+    (.browser_download_url|startswith($prefix) and endswith($suffix)))]|length)==1' "$scratch/uploaded.json" >/dev/null || fail 'draft 제목·노트·asset 업로드 무결성 불일치 — 공개하지 않습니다'
 gh release edit "$tag" --repo "$repository" --draft=false >/dev/null
+release_json > "$scratch/published.json"
+command jq -e --arg digest "sha256:$digest" --arg url "https://github.com/$repository/releases/download/$tag/routine-automation-$version.zip" '
+  .draft==false and ([.assets[]|select(.digest==$digest and .browser_download_url==$url)]|length)==1' "$scratch/published.json" >/dev/null || fail '공개 후 asset URL·digest 불일치 — 저장소를 확인하세요'
 echo '공개 완료 — Immutable Release의 asset·태그는 수정할 수 없습니다. 수정은 새 버전으로 배포하세요.'

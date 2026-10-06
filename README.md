@@ -1,6 +1,6 @@
 # routine-automation — 공개 베타
 
-**0.1.1 베타**는 팀 시범 사용을 위한 배포입니다. 안정판이 아니며 설정·동작이 바뀔 수 있습니다. Finder 보안 경고, launchd/TCC 권한과 조직별 Slack 화면은 격리 테스트만으로 보장하지 않습니다. 이번 변경의 GitHub 통신은 스텁으로 검증했습니다. 도입 전 회사의 소스 공개·업무 데이터·LLM 사용 정책을 확인하세요.
+**0.1.2 베타**는 팀 시범 사용을 위한 배포입니다. 안정판이 아니며 설정·동작이 바뀔 수 있습니다. Finder 보안 경고, launchd/TCC 권한과 조직별 Slack 화면은 격리 테스트만으로 보장하지 않습니다. 이번 변경의 GitHub 통신은 스텁으로 검증했습니다. 도입 전 회사의 소스 공개·업무 데이터·LLM 사용 정책을 확인하세요.
 
 공개 저장소: [coldplay126/routine-automation](https://github.com/coldplay126/routine-automation) · [베타 Release](https://github.com/coldplay126/routine-automation/releases) · [MIT 라이선스](LICENSE)
 

@@ -38,12 +38,23 @@ case "$1 ${2:-}" in
     case $4 in
       user) cat "$GH_ACCOUNT" ;;
       repos/coldplay126/routine-automation) printf '1405988374\n' ;;
+      # Like GitHub: the tags endpoint hides drafts, the authenticated list includes them, and
+      # draft assets live under untagged-* until the release is published.
+      'repos/coldplay126/routine-automation/releases?per_page=100')
+        state=$(cat "$GH_STATE" 2>/dev/null || echo none)
+        case $state in
+          none) printf '[]\n' ;;
+          draft) jq -n --rawfile title "$GH_TITLE" --rawfile body "$(cat "$GH_NOTES")" '[{draft:true,tag_name:"v0.1.1",name:$title,body:$body,assets:[]}]' ;;
+          uploaded|published)
+            zip=$(cat "$GH_ZIP"); digest=$(shasum -a 256 "$zip"); digest=${digest%% *}
+            [[ ${BAD_UPLOAD_DIGEST:-0} == 0 ]] || digest=$(printf '%064d' 0)
+            if [[ $state == published ]]; then draft=false; path=v0.1.1; else draft=true; path=untagged-4869941f228aac6f3191; fi
+            jq -n --rawfile title "$GH_TITLE" --rawfile body "$(cat "$GH_NOTES")" --arg digest "sha256:$digest" --argjson size "$(stat -f %z "$zip")" --argjson draft "$draft" --arg path "$path" '
+              [{draft:$draft,tag_name:"v0.1.1",name:$title,body:$body,assets:[{name:"routine-automation-0.1.1.zip",state:"uploaded",size:$size,digest:$digest,browser_download_url:("https://github.com/coldplay126/routine-automation/releases/download/"+$path+"/routine-automation-0.1.1.zip")}]}]' ;;
+        esac ;;
       repos/coldplay126/routine-automation/releases/tags/v0.1.1)
-        [[ $(cat "$GH_STATE") == uploaded ]] || exit 87
-        zip=$(cat "$GH_ZIP"); digest=$(shasum -a 256 "$zip"); digest=${digest%% *}
-        [[ ${BAD_UPLOAD_DIGEST:-0} == 0 ]] || digest=$(printf '%064d' 0)
-        jq -n --rawfile title "$GH_TITLE" --rawfile body "$(cat "$GH_NOTES")" --arg digest "sha256:$digest" --argjson size "$(stat -f %z "$zip")" '
-          {draft:true,tag_name:"v0.1.1",name:$title,body:$body,assets:[{name:"routine-automation-0.1.1.zip",state:"uploaded",size:$size,digest:$digest,browser_download_url:"https://github.com/coldplay126/routine-automation/releases/download/v0.1.1/routine-automation-0.1.1.zip"}]}' ;;
+        # Drafts are not reachable here (HTTP 404 on GitHub).
+        [[ $(cat "$GH_STATE" 2>/dev/null) == published ]] || exit 1 ;;
       *) exit 87 ;;
     esac ;;
   'auth switch')
@@ -71,6 +82,9 @@ case "$1 ${2:-}" in
   'release upload')
     [[ $3 == v0.1.1 && $(cat "$GH_STATE") == draft && -f $4 && $5 == --repo && $6 == coldplay126/routine-automation ]] || exit 87
     printf '%s' "$4" > "$GH_ZIP"; printf 'uploaded\n' > "$GH_STATE"; echo uploaded >> "$RECORD" ;;
+  'release delete')
+    [[ $3 == v0.1.1 && $4 == --repo && $5 == coldplay126/routine-automation && $6 == --yes ]] || exit 87
+    case $(cat "$GH_STATE" 2>/dev/null) in draft|uploaded) printf 'none\n' > "$GH_STATE"; echo deleted-draft >> "$RECORD" ;; *) exit 87 ;; esac ;;
   'release edit')
     [[ $3 == v0.1.1 && $4 == --repo && $5 == coldplay126/routine-automation && $6 == --draft=false && $(cat "$GH_STATE") == uploaded ]] || exit 87
     printf 'published\n' > "$GH_STATE"; echo published >> "$RECORD" ;;
@@ -147,5 +161,11 @@ if (cd "$public_success" && printf 'refs/heads/main %s refs/heads/main %s\n' "$(
 rm -f "$GH_STATE"
 if BAD_UPLOAD_DIGEST=1 "$development/tools/release.sh" 0.1.1 "$sandbox/public-mismatch" --publish > "$sandbox/digest-mismatch" 2>&1; then fail '업로드 digest 불일치 공개'; fi
 [[ $(cat "$GH_STATE") == uploaded && $(cat "$GH_ACCOUNT") == fixture-owner ]] || fail '불일치 draft 보존·계정 복귀 실패'
+# A draft left by an interrupted publish is replaced on rerun; it is then published normally.
+"$development/tools/release.sh" 0.1.1 "$sandbox/public-mismatch" --publish > "$sandbox/resumed" 2>&1 || { cat "$sandbox/resumed" >&2; fail '중단된 draft가 남은 재실행 실패'; }
+if [[ $(cat "$GH_STATE") != published ]] || ! grep -q '^deleted-draft' "$RECORD"; then fail '남은 draft 교체·공개 실패'; fi
+# A published (immutable) release is never replaced.
+if "$development/tools/release.sh" 0.1.1 "$sandbox/public-mismatch" --publish > "$sandbox/republish" 2>&1; then fail '공개된 Release 재게시'; fi
+if ! grep -q '이미 공개된' "$sandbox/republish" || [[ $(cat "$GH_STATE") != published ]]; then fail '공개된 Release 보호 실패'; fi
 ! grep -q '^forbidden' "$RECORD" || fail '실제 네트워크 또는 금지 명령 진입'
 printf 'PASS: 실제 archive·공개 신원/태그·노트 절·준비 재실행·개인 값 pre-push 거부·스텁 draft 업로드 검증/공개·계정 복귀\n'

@@ -354,7 +354,7 @@ else
   click "$container"
   state
   # Locate the revealed reply action only within the same current-day block.
-  reply=$(jq -L "$share_dir" -er 'include "slack"; tree_text | scrum_block | [.lines[]|select(.body|contains(slack_labels.reply))|.index] | if length==1 then .[0] else error("스레드에서 답장 버튼을 직접 열어 주세요") end' "$work/state.json") || fail '스레드에서 답장 버튼을 확인하지 못했습니다'
+  reply=$(jq -L "$share_dir" -er 'include "slack"; tree_text | scrum_block | [.lines[]|select(.body|reply_action)|.index] | if length==1 then .[0] else error("스레드에서 답장 버튼을 직접 열어 주세요") end' "$work/state.json") || fail '스레드에서 답장 버튼을 확인하지 못했습니다'
   click "$reply"
 fi
 # Require the correct root and three consecutive stable snapshots before checking duplicates.
