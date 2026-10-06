@@ -2,8 +2,8 @@
 def slack_labels: {search:"버튼 검색",combo:"콤보 상자",editor:"텍스트 엔트리 영역",list:"내용 목록 ",thread_panel:" 채널의 스레드",thread_list:"의 스레드",open_channel:"채널에서 열기",comments:"개의 댓글",user_menu:"팝업 버튼 사용자:",today:"오늘, ",reply:"버튼 스레드에서 답장",broadcast:"(으)로도 전송",toolbar:"도구 막대",search_panel:"검색 결과",search_dialog:"대화상자, Title: 검색"};
 def slack_settings: $ARGS.named.routine.slack // {channel_name:"",post_title:"",post_time_prefix:"오전 8:0"};
 def today_timestamp: contains("link ["+slack_labels.today+slack_settings.post_time_prefix);
-# The hover action that opens a post's thread; Slack has labelled it both ways.
-def reply_action: test("^"+slack_labels.reply+"$") or test("^버튼 스레드의 댓글$");
+# The hover action that opens a post's thread; Slack has used all three labels.
+def reply_action: test("^버튼 (스레드에서 답장|스레드의 댓글|스레드에 댓글 달기)$");
 def tree_text: .result.snapshot.treeText // .snapshot.treeText // .treeText // error("Missing treeText");
 # Orca prints element indexes as "[12] role" (older) or "12 role" (current).
 def ax_lines:
@@ -58,13 +58,70 @@ def visible_label_checks:
      required:(if $key=="search" then $main elif $key=="combo" then $search else $thread end)});
 def ax_index($pattern): [ax_lines[]|select(.index!=null and (.body|test($pattern)))|.index]|if length==1 then .[0] else error("Ambiguous or missing accessibility target: "+$pattern) end;
 def timestamp_link: test("^link \\[(오늘|어제|[0-9]{1,2}월 [0-9]{1,2}일), (오전|오후) [0-9]{1,2}:[0-9]{2}(:[0-9]{2})?\\]\\(https?://[^)]+\\)$");
-def search_results:
+# Never parse links from the channel/thread panes behind the search surface.
+def search_list_label: test("^내용 목록 (채널의 메시지 결과|메시지 결과(?:, [0-9]+/[0-9]+페이지)?)$");
+def search_surface_lines:
   ax_lines as $lines |
-  [range(0;$lines|length) as $i|$lines[$i]|select(.body|test("link \\[.*\\]\\(https?://"))|
-   (.body|capture("link \\[(?<ts_text>[^]]+)\\]\\((?<url>https?://[^)]+)\\)")) as $link |
-   ($lines[$i+1:]|.[:(map(.body|test("link \\[.*\\]\\(https?://"))|index(true) // length)]) as $tail |
-   [$tail[]|select(.body|startswith("container, Text:"))|.body|sub("^container, Text:[[:space:]]*";"")] as $text |
-   select($text|length>0)|$link+{channel:([$tail[]|.body|select(test("스레드:"))|sub("^.*스레드:[[:space:]]*";"")][0] // ""),text:($text|join("\n"))}][:50];
+  [range(0;$lines|length)|select($lines[.].body|search_list_label)] as $starts |
+  if ($starts|length)!=1 then error("검색 결과 목록을 하나로 식별하지 못했습니다") else $starts[0] as $s |
+    [range(0;$s) as $h |
+      select($lines[$h].body|test("^container (채널 내에서 검색|검색)$")) |
+      select($lines[$h].indent<$lines[$s].indent) |
+      select(all($lines[$h+1:$s][];.indent>$lines[$h].indent)) | $h] as $parents |
+    if ($parents|length)==0 then error("검색 패널 경계를 확인하지 못했습니다") else $parents[-1] as $start |
+      ([$lines[$start+1:]|to_entries[]|select(.value.indent<=$lines[$start].indent)|.key+$start+1][0] // ($lines|length)) as $end |
+      $lines[$start:$end] end end;
+def search_result_lines:
+  search_surface_lines as $lines |
+  [range(0;$lines|length)|select($lines[.].body|search_list_label)][0] as $s |
+  ([$lines[$s+1:]|to_entries[]|select(.value.indent<=$lines[$s].indent)|.key+$s+1][0] // ($lines|length)) as $end |
+  $lines[$s:$end];
+def search_results:
+  search_result_lines as $lines |
+  [range(1;$lines|length) as $i | $lines[$i] |
+   select(.body|test("^link \\[.*\\]\\(https?://")) |
+   (.body|capture("^link \\[(?<ts_text>[^]]+)\\]\\((?<url>https?://[^)]+)\\)$")) as $link |
+   [range(1;$i) as $h |
+    select($lines[$h].body|test("^container(?:[, ]|$)")) |
+    select($lines[$h].indent<$lines[$i].indent) |
+    select(all($lines[$h+1:$i][];.indent>$lines[$h].indent)) | $h] as $parents |
+   if ($parents|length)==0 then error("검색 결과 메시지 경계를 확인하지 못했습니다") else
+     $parents[0] as $start | $parents[-1] as $header |
+     ([$lines[$start+1:]|to_entries[]|select(.value.indent<=$lines[$start].indent)|.key+$start+1][0] // ($lines|length)) as $end |
+     [$lines[$header+1:$i][]|.body|select(startswith("버튼 "))|ltrimstr("버튼 ")] as $authors |
+     [$lines[$start+1:$end][]|.body|
+       if startswith("container, Text:") then sub("^container, Text:[[:space:]]*";"")
+       elif startswith("텍스트, Value:") then sub("^텍스트, Value:[[:space:]]*";"") else empty end] as $text |
+     $link+{author:(if ($authors|length)==1 then $authors[0] else "" end),
+       channel:([$lines[$start+1:$end][]|.body|select(test("스레드:"))|sub("^.*스레드:[[:space:]]*";"")][0] // ""),
+       text:($text|join("\n"))} end];
+def search_report:
+  . as $tree | search_result_lines as $list |
+  ($list|any(.[];.body=="텍스트, Value: 찾은 결과가 없습니다")) as $empty |
+  ($tree|search_surface_lines) as $lines |
+  ([range(1;$lines|length) as $i |
+    select($lines[$i].body=="텍스트, Value: 개의 결과를 찾음") |
+    $lines[$i-1].body|capture("^텍스트, Value: (?<n>[0-9]+)$").n|tonumber] +
+   [$lines[].body|capture("^텍스트, Value: 결과 (?<n>[0-9]+)건$").n|tonumber]) as $counts |
+  ($tree|search_results) as $items |
+  if $empty and ($items|length)>0 then error("검색 결과의 빈 상태가 모순됩니다")
+  elif ($items|length)==0 and ($empty|not) then error("검색 결과/빈 상태를 확인하지 못했습니다")
+  else {items:$items,total:(if $empty then 0 elif ($counts|length)==1 then $counts[0] else null end)} end;
+def search_has_own_reply($ts):
+  ($ARGS.named.routine.identity.slack_display_name // "") as $name |
+  ($ARGS.named.routine.slack.channel_id // "") as $channel |
+  [.items[]|select(.author==$name and $name!="")|
+    ([.url|capture("^https?://[^/]+/archives/(?<channel>[CGD][A-Z0-9]+)/p[0-9]{16}(?:\\?(?<query>[^#]+))?$")][0]) as $url |
+    if $url==null then {duplicate:false,valid:false}
+    elif $url.channel!=$channel then {duplicate:false,valid:true}
+    else [($url.query // "")|split("&")[]|select(startswith("thread_ts="))|ltrimstr("thread_ts=")] as $threads |
+      if ($threads|length)==0 then {duplicate:false,valid:true}
+      elif ($threads|length)!=1 or ($threads[0]|test("^[0-9]{10}\\.[0-9]{6}$")|not) then {duplicate:false,valid:false}
+      else {duplicate:($threads[0]==$ts),valid:true} end end] as $matches |
+  if any($matches[];.duplicate) then true
+  elif any($matches[];.valid|not) then error("검색 결과 메시지 URL/thread_ts를 해석하지 못했습니다")
+  elif .total==null or .total!=(.items|length) then error("전체 검색 결과를 확인하지 못했습니다")
+  else false end;
 def scrum_blocks_for($dates):
   ax_lines as $lines |
   [range(0;$lines|length) as $heading | select(slack_settings.post_title|length>0) | select($lines[$heading].body|contains(slack_settings.post_title)) |
@@ -101,11 +158,8 @@ def thread_comment_list:
     ([$lines[$i].body|capture("(?<n>[0-9]+)"+slack_labels.comments).n|tonumber][0] // 0) as $count |
     ([$lines[$i+1:]|to_entries[]|select(.value.indent<=$lines[$i].indent)|.key+$i+1][0] // ($lines|length)) as $end |
     {count:$count,lines:$lines[$i+1:$end]} end;
-def thread_list_index:
-  thread_lines | [.[]|select(.index!=null and (.body|startswith(slack_labels.list+slack_settings.channel_name+slack_labels.thread_list)))] |
-  if length==1 then .[0].index else error("스크롤할 댓글 목록을 확인하지 못했습니다") end;
 # A reply identity is its canonical message URL, after verifying its thread_ts.
-# Query variations must not let the same reply count twice across scroll pages.
+# Also used by learning to extract only replies belonging to the selected root.
 def thread_reply_urls($url):
   ([$url|capture("/p(?<a>[0-9]{10})(?<b>[0-9]{6})$")|"\(.a).\(.b)"][0]) as $ts |
   if $ts==null then [] else
@@ -122,13 +176,6 @@ def thread_identified($url):
     (try (thread_comment_list as $list | [$list.lines[]|.body|select(reply_timestamp_link)] as $links |
       [$links[]|capture("[?&]thread_ts=(?<ts>[0-9.]+)").ts] as $tss |
       $list.count>0 and ($links|length)>0 and ($tss|length)==($links|length) and all($tss[];.==$ts)) catch false));
-# All N comments are on screen (comment links carry thread_ts; the root link does not).
-def thread_complete:
-  try (thread_comment_list as $list | [$list.lines[]|.body|select(reply_timestamp_link and test("[?&]thread_ts="))]|length==$list.count) catch false;
-# $complete: also require every comment visible (before the duplicate check; a long pasted draft
-# later pushes comments out of view, so post-paste guards only re-identify the thread).
-def thread_matches_root($url; $complete):
-  thread_identified($url) and (($complete|not) or thread_complete);
 # Ignore the account menu when looking for the configured user's own comments.
 def own_comment: ($ARGS.named.routine.identity.slack_display_name // "") as $name | thread_lines|any(.[]; ($name|length)>0 and (.body|contains($name) and (startswith(slack_labels.user_menu)|not)));
 def thread_editor:

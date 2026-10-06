@@ -255,6 +255,8 @@ phase='Orca 실행 준비'; phase_id=runtime
 for cmd in jq osascript; do command -v "$cmd" >/dev/null || { echo "필요한 명령이 없습니다: $cmd" >&2; exit 2; }; done
 # shellcheck source=../share/orca.sh
 source "$share_dir/orca.sh"
+# shellcheck source=../share/slack-search.sh
+source "$share_dir/slack-search.sh"
 orca=$(find_orca) || { echo 'Orca를 실행할 수 없습니다. /Applications/Orca.app 설치와 실행 권한을 확인하세요.' >&2; exit 2; }
 ensure_orca_runtime "$orca" || { echo 'Orca 앱 런타임이 시작되지 않았습니다. Orca를 실행한 뒤 다시 시도하세요.' >&2; exit 2; }
 phase='Slack 스레드 확인'; phase_id=thread
@@ -269,9 +271,8 @@ click() {
   "$orca" computer click --app com.tinyspeck.slackmacgap --element-index "$index" --no-screenshot --json >/dev/null
   auto_gui_activity
 }
-# $1=true also requires every comment to be visible (before the duplicate check).
 thread_guard() {
-  jq -L "$share_dir" -e --arg url "$expected_root_url" --argjson complete "${1:-false}" 'include "slack"; tree_text|thread_matches_root($url; $complete)' "$work/state.json" >/dev/null 2>&1 ||
+  jq -L "$share_dir" -e --arg url "$expected_root_url" 'include "slack"; tree_text|thread_identified($url)' "$work/state.json" >/dev/null 2>&1 ||
     { failure_reason='오늘 스크럼 스레드 루트 불일치 또는 준비 미완료'; echo "$failure_reason" >&2; return 1; }
 }
 stop_existing_input() {
@@ -281,43 +282,6 @@ stop_existing_input() {
     if ((auto)); then terminal '입력창에 이미 내용 있음'; fi
     terminal '입력창에 이미 내용 있음. --replace로만 교체할 수 있습니다.'
   fi
-}
-scroll_thread() {
-  local direction=$1 pages=$2 index
-  state
-  thread_guard
-  index=$(jq -L "$share_dir" -er 'include "slack"; tree_text|thread_list_index' "$work/state.json") || fail '스크롤할 댓글 목록을 확인하지 못했습니다'
-  auto_input_guard
-  "$orca" computer scroll --app com.tinyspeck.slackmacgap --element-index "$index" --direction "$direction" --pages "$pages" --no-screenshot --json >/dev/null
-  auto_gui_activity
-  sleep 0.5
-}
-scan_thread_replies() {
-  local count current_count urls seen='[]' page own_seen=0
-  count=$(jq -L "$share_dir" -er 'include "slack"; tree_text|thread_comment_list.count' "$work/state.json") || fail '전체 댓글 수를 확인하지 못했습니다'
-  # An own comment already on screen is terminal; no need to scroll.
-  if ((!force)) && jq -L "$share_dir" -e 'include "slack"; tree_text|own_comment' "$work/state.json" >/dev/null; then
-    terminal '이미 본인 댓글이 있습니다'
-  fi
-  scroll_thread up 20
-  for page in 0 1 2 3 4 5 6 7 8 9 10 11 12; do
-    state
-    thread_guard
-    stop_existing_input
-    current_count=$(jq -L "$share_dir" -er 'include "slack"; tree_text|thread_comment_list.count' "$work/state.json") || fail '현재 댓글 수를 확인하지 못했습니다'
-    [[ $current_count == "$count" ]] || fail '스크롤 중 댓글 수가 바뀌었습니다. 다시 확인하세요.'
-    if jq -L "$share_dir" -e 'include "slack"; tree_text|own_comment' "$work/state.json" >/dev/null; then
-      own_seen=1
-      if ((!force)); then terminal '이미 본인 댓글이 있습니다'; fi
-    fi
-    urls=$(jq -L "$share_dir" -ec --arg url "$expected_root_url" 'include "slack"; tree_text|thread_reply_urls($url)' "$work/state.json") || fail '보이는 댓글 링크를 확인하지 못했습니다'
-    seen=$(jq -nc --argjson seen "$seen" --argjson urls "$urls" '$seen+$urls|unique') || fail '댓글 링크를 합치지 못했습니다'
-    [[ $(jq -r 'length' <<< "$seen") == "$count" ]] && break
-    ((page < 12)) || break
-    scroll_thread down 1
-  done
-  [[ $(jq -r 'length' <<< "$seen") == "$count" ]] || fail '스크롤 범위 안에서 전체 댓글을 확인하지 못했습니다. 다시 실행하세요.'
-  printf '댓글 %s개 확인 (본인 댓글=%s)\n' "$count" "$own_seen"
 }
 checkbox() { jq -L "$share_dir" -er 'include "slack"; tree_text|broadcast_checkbox' "$work/state.json"; }
 unchanged_checkbox() {
@@ -348,6 +312,43 @@ fi
 block=$(jq -er 'if length==1 then .[0] else error("오늘 스크럼 글이 여러 개입니다") end' <<< "$blocks") || fail '오늘 스크럼 글이 여러 개이거나 모호합니다'
 expected_root_url=$(jq -L "$share_dir" -er 'include "slack"; .lines[].body|select(today_timestamp)|capture("\\((?<url>https?://[^)]+)\\)").url' <<< "$block") || fail '오늘 스크럼 루트 링크를 확인하지 못했습니다'
 reply=$(jq -r '.reply // empty' <<< "$block")
+expected_root_ts=$(jq -ner --arg url "$expected_root_url" --arg channel "$(routine_get slack.channel_id)" '
+  $url|capture("/archives/(?<channel>[CG][A-Z0-9]+)/p(?<a>[0-9]{10})(?<b>[0-9]{6})$") |
+  if .channel==$channel then "\(.a).\(.b)" else error("Unexpected root channel") end') ||
+  { slack_format_notice '채널/루트 URL' "$work/state.json"; fail '오늘 스크럼 루트 시각을 확인하지 못했습니다'; }
+if [[ -n $reply ]]; then
+  # Plain channel names retain Slack's usual in:#name spelling. Quote other
+  # names as one modifier value, escaping quotes/backslashes rather than syntax.
+  query=$(jq -nr --arg channel "$(routine_get slack.channel_name)" --arg day "$day" '
+    ($channel|ltrimstr("#")) as $name |
+    if ($name|test("[\u0000-\u001f]")) or $name=="" then error("Invalid search channel")
+    else "from:me in:"+(if ($name|test("^[\\p{L}\\p{N}_-]+$")) then "#"+$name else ("#"+$name|@json) end)+" on:"+$day end') ||
+    fail 'Slack 검색 채널명을 구성하지 못했습니다'
+  phase='Slack 검색으로 본인 댓글 확인'; phase_id=search
+  if slack_search "$query" "$work/duplicate-search.json" false; then :
+  else
+    search_status=$?
+    failure_reason=${failure_reason:-${slack_search_error:-Slack 검색 실패}}
+    exit "$search_status"
+  fi
+  duplicate=$(jq -L "$share_dir" -r --arg ts "$expected_root_ts" 'include "slack"; search_has_own_reply($ts)' "$work/duplicate-search.json") ||
+    { slack_format_notice '검색/댓글 URL' "$work/slack.state"; fail '검색 결과의 댓글 링크를 해석하지 못했습니다'; }
+  if [[ $duplicate == true && $force == 0 ]]; then terminal '이미 본인 댓글이 있습니다'; fi
+  # Search changes the pane and all AX indexes. Reopen and identify the post
+  # again, then compare its exact permalink before using the new reply index.
+  phase='검색 후 Slack 스크럼 글 재확인'; phase_id=thread
+  auto_input_guard
+  open "slack://channel?team=$(routine_get slack.team_id)&id=$(routine_get slack.channel_id)"
+  auto_gui_activity
+  sleep 3
+  state
+  block=$(jq -L "$share_dir" -ec 'include "slack"; tree_text|scrum_block' "$work/state.json") ||
+    { slack_format_notice '채널/검색 후 스크럼 글' "$work/state.json"; fail '검색 후 오늘 스크럼 글을 다시 식별하지 못했습니다'; }
+  current_root_url=$(jq -L "$share_dir" -er 'include "slack"; .lines[].body|select(today_timestamp)|capture("\\((?<url>https?://[^)]+)\\)").url' <<< "$block") ||
+    fail '검색 후 스크럼 루트 링크를 확인하지 못했습니다'
+  [[ $current_root_url == "$expected_root_url" ]] || fail '검색 후 오늘 스크럼 루트 URL이 바뀌었습니다'
+  reply=$(jq -r '.reply // empty' <<< "$block")
+fi
 if [[ -n $reply ]]; then
   click "$reply"
 else
@@ -368,7 +369,7 @@ for _ in 1 2 3 4 5 6 7 8; do
   if ! state 2>/dev/null; then
     stable=0; previous=''; printf 'poll %s: state=실패\n' "$poll" >> "$work/poll-trace"; sleep 0.5; continue
   fi
-  if ! thread_guard false 2>/dev/null; then
+  if ! thread_guard 2>/dev/null; then
     stable=0; previous=''
     jq -L "$share_dir" -r --arg url "$expected_root_url" --arg poll "$poll" 'include "slack"; tree_text |
       "poll \($poll): state=성공 root_match=\(try (thread_root|[.lines[]|.body|select(timestamp_link)|capture("\\((?<u>https?://[^)]+)\\)").u]==[$url]) catch "오류") comment_list=\(try (thread_comment_list.count|tostring) catch "없음") thread_panel=\(try (thread_lines|length|tostring) catch "없음")"' \
@@ -387,7 +388,6 @@ done
 ((stable>=3)) || { slack_format_notice '스레드/루트·댓글 목록' "$work/state.json" "$work/poll-trace"; echo '오늘 스크럼 스레드 루트 또는 댓글 목록을 제한 시간 안에 확인하지 못했습니다. 다시 실행하세요.' >&2; exit 1; }
 # Existing content (judged on the stable snapshot) is terminal even when older replies are off screen.
 stop_existing_input
-if ! thread_guard true; then scan_thread_replies; failure_reason=''; fi
 if ((!force)) && jq -L "$share_dir" -e 'include "slack"; tree_text | own_comment' "$work/state.json" >/dev/null; then
   if ((auto)); then terminal '이미 본인 댓글이 있습니다'; fi
   terminal '이미 본인 댓글이 있습니다. 중복을 확인한 뒤 --force를 사용하세요.'

@@ -17,6 +17,8 @@ routine_load_config
 source "$share_dir/orca.sh"
 # shellcheck source=../share/gui-guard.sh
 source "$share_dir/gui-guard.sh"
+# shellcheck source=../share/slack-search.sh
+source "$share_dir/slack-search.sh"
 # shellcheck source=../share/sources.sh
 source "$share_dir/sources.sh"
 usage() {
@@ -395,74 +397,21 @@ collect_notion() {
   mv "$work/notion.normalized" "$work/notion.json"
 }
 
-poll_slack_target() {
-  local filter=$1 attempt value
-  shift
-  for attempt in 1 2 3 4 5; do
-    if "$orca" computer get-app-state --app com.tinyspeck.slackmacgap --no-screenshot --json > "$work/slack.state" &&
-       value=$(jq -L "$share_dir" -er "$@" "$filter" "$work/slack.state" 2> "$work/slack-poll.error"); then
-      printf '%s\n' "$value"
-      return 0
-    fi
-    ((attempt == 5)) || sleep 1
-  done
-  [[ ! -f $work/slack-poll.error ]] || cat "$work/slack-poll.error" >&2
-  return 1
-}
 
 collect_slack() {
   [[ ${ROUTINE_ALLOW_GUI:-0} == 1 ]] || { source_error='GUI source skipped'; return 1; }
-  local orca search_index combo_index query suggestion focused restore_status invalid_timestamps
-  # Prefer an explicit PATH selection (also permits isolated test stubs), but skip
-  # entries that cannot run (e.g. a root-only /usr/local/bin/orca symlink).
-  orca=$(find_orca) || { source_error='Orca is unavailable'; return 1; }
-  ensure_orca_runtime "$orca" || { source_error='Orca runtime did not start'; return 1; }
-  source_error='Slack search failed'
-  auto_input_guard || return $?
-  open -a Slack || return 1
-  auto_gui_activity || return 1
-  search_index=$(poll_slack_target 'include "slack"; tree_text | ax_index(slack_labels.search)') || { slack_format_notice '검색/검색 버튼' "$work/slack.state"; return 1; }
-  auto_input_guard || return $?
-  "$orca" computer click --app com.tinyspeck.slackmacgap --element-index "$search_index" --no-screenshot --json >/dev/null || return 1
-  auto_gui_activity || return 1
-  combo_index=$(poll_slack_target 'include "slack"; tree_text | ax_index(slack_labels.combo)') || { slack_format_notice '검색/콤보 상자' "$work/slack.state"; return 1; }
+  local query search_status invalid_timestamps
   query="from:me after:$(date -r "$((since_epoch - 86400))" '+%Y-%m-%d')"
-  auto_input_guard || return $?
-  "$orca" computer set-value --app com.tinyspeck.slackmacgap --element-index "$combo_index" --value "$query" --no-screenshot --json >/dev/null || return 1
-  auto_gui_activity || return 1
-  # shellcheck disable=SC2016 # jq filter; $query is a jq variable
-  if suggestion=$(poll_slack_target 'include "slack"; tree_text | ax_lines | [.[] | select(.body == ("메뉴 항목, Value: " + $query + " 검색")) | .index] | select(length==1) | .[0]' --arg query "$query"); then :
+  if slack_search "$query" "$work/slack.search.json"; then :
   else
-    suggestion=$(jq -L "$share_dir" -r --arg query "$query" 'include "slack"; tree_text | ax_lines | [.[] | select(.body == ("메뉴 항목, Value: " + $query + " 검색")) | .index] | if length == 1 then .[0] elif length == 0 then empty else error("Ambiguous search suggestion") end' "$work/slack.state") || return 1
+    search_status=$?
+    source_error=$slack_search_error
+    return "$search_status"
   fi
-  if [[ -n $suggestion ]]; then
-    auto_input_guard || return $?
-    "$orca" computer click --app com.tinyspeck.slackmacgap --element-index "$suggestion" --no-screenshot --json >/dev/null || return 1
-    auto_gui_activity || return 1
-  else
-    # Return can only confirm a freshly observed, focused search combo box.
-    combo_index=$(jq -L "$share_dir" -er 'include "slack"; tree_text | ax_index(slack_labels.combo)' "$work/slack.state") || return 1
-    focused=$(jq -r '.result.snapshot.focusedElementId // .snapshot.focusedElementId // empty' "$work/slack.state") || return 1
-    [[ $focused == "$combo_index" ]] || { source_error='Slack search focus could not be verified'; return 1; }
-    auto_input_guard || return $?
-    "$orca" computer press-key --app com.tinyspeck.slackmacgap --key Return --no-screenshot --json >/dev/null || return 1
-    auto_gui_activity || return 1
-  fi
-  sleep 4
-  "$orca" computer get-app-state --app com.tinyspeck.slackmacgap --no-screenshot --json > "$work/slack.state" || return 1
-  jq -L "$share_dir" 'include "slack"; tree_text | search_results | map(. + {epoch:((try (.url|capture("/p(?<ts>[0-9]{10})[0-9]{6}(?:[?]|$)").ts|tonumber) catch null) // null)})' "$work/slack.state" > "$work/slack.rows.json" || return 1
+  jq '.items[:50]|map(del(.author) + {epoch:((try (.url|capture("/p(?<ts>[0-9]{10})[0-9]{6}(?:[?]|$)").ts|tonumber) catch null) // null)})' "$work/slack.search.json" > "$work/slack.rows.json" || return 1
   invalid_timestamps=$(jq '[.[]|select(.epoch==null)]|length' "$work/slack.rows.json")
   if ((invalid_timestamps>0)); then add_error slack "Slack URL timestamp could not be parsed ($invalid_timestamps messages; check screen/URL format)"; fi
   jq -L "$share_dir" --argjson since "$since_epoch" --argjson until "$until_epoch" 'include "redact"; map(select(.epoch!=null and .epoch >= $since and .epoch < $until) | del(.epoch) | .text |= redact | .url |= redact_url)' "$work/slack.rows.json" > "$work/slack.json" || return 1
-  # Restore immediately after Slack reads, before scrum-draft starts its model.
-  if restore_previous_app; then :
-  else
-    restore_status=$?
-    if [[ $restore_status != 4 && -n ${ROUTINE_GUI_ACTIVITY_FILE:-} ]]; then
-      printf 'Slack 수집 후 전면 복원 확인 실패\n' > "$ROUTINE_GUI_ACTIVITY_FILE.focus-warning"
-    fi
-    return "$restore_status"
-  fi
 }
 
 selected=0 failed=0 slack_success=false

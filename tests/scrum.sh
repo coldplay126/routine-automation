@@ -69,8 +69,8 @@ echo com.tinyspeck.slackmacgap > "$FOREGROUND"
 if [[ ${AUTO_SELF_RESET:-0} == 1 ]]; then perl -MTime::HiRes=time -e 'printf "%.0f\n", time*1000' > "$HID_RESET_EPOCH"; fi
 [[ ${PASTE_MODE:-} != signal-open ]] || kill -TERM "$PPID"
 if [[ ${1-} == -a ]]; then echo search > "$STAGE"; else echo channel > "$STAGE"; fi
-rm -f -- "$STAGE.polls" "$STAGE.pasted" "$STAGE.scroll-page"
-if [[ ${1-} == -a ]]; then rm -f -- "$STAGE".*.polls; fi
+rm -f -- "$STAGE.polls" "$STAGE.pasted"
+if [[ ${1-} == -a ]]; then rm -f -- "$STAGE".*.polls "$STAGE.cleared"; fi
 OPEN
 cat > "$HOME/.local/bin/sleep" <<'SLEEP'
 #!/usr/bin/env bash
@@ -118,9 +118,20 @@ case $2 in
   click)
     index=''
     while (($#)); do if [[ $1 == --element-index ]]; then index=$2; break; fi; shift; done
-    case $index in 5|10) echo combo > "$STAGE" ;; 17) echo results > "$STAGE" ;; 31|33) echo thread > "$STAGE" ;; 30) echo reveal > "$STAGE" ;; 44) echo focused > "$STAGE" ;; *) exit 87 ;; esac ;;
+    case $index in
+      5|10) echo combo > "$STAGE" ;;
+      6) touch "$STAGE.cleared" ;;
+      17) echo results > "$STAGE" ;;
+      21) echo channel > "$STAGE" ;;
+      31|33|61) echo thread > "$STAGE" ;;
+      30) echo reveal > "$STAGE" ;;
+      44) echo focused > "$STAGE" ;;
+      *) exit 87 ;;
+    esac ;;
   set-value)
     while (($#)); do if [[ $1 == --value ]]; then printf '%s\n' "$2" > "$STAGE.query"; break; fi; shift; done
+    [[ ${PASTE_MODE:-} != search-fail ]] || exit 89
+    [[ $2 != *' on:'* ]] || touch "$STAGE.searched"
     echo query > "$STAGE" ;;
   press-key) [[ $stage == query && ${SEARCH_MODE:-} == fallback ]] || exit 88; echo results > "$STAGE" ;;
   hotkey)
@@ -128,21 +139,12 @@ case $2 in
     [[ ${PASTE_MODE:-} != child-three ]] || exit 3
     [[ $stage == focused ]] || exit 88
     [[ " $* " != *' Cmd+V '* ]] || touch "$STAGE.pasted" ;;
-  scroll)
-    direction='' pages='' index=''
-    while (($#)); do
-      case $1 in --direction) direction=$2; shift ;; --pages) pages=$2; shift ;; --element-index) index=$2; shift ;; esac
-      shift
-    done
-    [[ $index == 42 && $stage == thread ]] || exit 88
-    if [[ $direction == up && $pages == 20 ]]; then echo 0 > "$STAGE.scroll-page"
-    elif [[ $direction == down && $pages == 1 ]]; then page=$(cat "$STAGE.scroll-page"); echo "$((page+1))" > "$STAGE.scroll-page"
-    else exit 88; fi ;;
   get-app-state)
     focus=null
     case $stage in
       search)
         tree='[5] 버튼 검색'
+        if [[ ${SEARCH_MODE:-} == prior ]]; then tree=$'[5] 버튼 검색: from:@테스트_사용자 on:2026-09-27\n[6] 버튼 검색 지우기\n[7] 버튼 채널 내에서 검색'; fi
         if [[ ${SEARCH_MODE:-} == loading || ${SEARCH_MODE:-} == never-search ]]; then
           polls=$(cat "$STAGE.search.polls" 2>/dev/null || echo 0); polls=$((polls+1)); echo "$polls" > "$STAGE.search.polls"
           fixture=slack-search-loading.json
@@ -169,10 +171,38 @@ case $2 in
           *) tree+=$'\n'"[17] 메뉴 항목, Value: $query 검색" ;;
         esac ;;
       results)
-        tree=$'[20] link [금요일, 오전 9:00](https://slack.example/archives/C1/p1790294400000000)\n[21] container, Text: 운영 배포 완료 token=secret123\n[22] 스레드: #제품\n[23] link [금요일, 오전 9:05](https://slack.example/archives/C1/p1790294700000000)\n[24] container, Text: 다음 작업\n[25] 스레드: #개발'
-        if [[ ${SEARCH_MODE:-} == cutoff ]]; then tree+=$'\n[26] link [오늘, 오전 12:00](https://slack.example/archives/C1/p1790521200000000)\n[27] container, Text: 오늘 자정 작업\n[28] 스레드: #개발'; fi
-        if [[ ${SEARCH_MODE:-} == malformed-url ]]; then tree+=$'\n[26] link [금요일, 오전 9:10](https://slack.example/archives/C1/not-a-timestamp)\n[27] container, Text: 해석할 수 없는 메시지\n[28] 스레드: #개발'; fi
-        [[ ${SEARCH_MODE:-} != empty ]] || tree='' ;;
+        query=$(cat "$STAGE.query")
+        if [[ $query == *' on:'* ]]; then
+          tree=$(jq -r '.result.snapshot.treeText' "$FIXTURES/slack-duplicate-results.json")
+          case ${PASTE_MODE:-} in
+            search-own) ;;
+            search-own-incomplete) tree=${tree/$'\t22 텍스트, Value: 1'/$'\t22 텍스트, Value: 12'} ;;
+            search-other|search-incomplete)
+              tree=${tree//thread_ts=1790895609.247049/thread_ts=1790895608.539999}
+              extra=$'\n\t\t35 container 다른 채널 댓글\n\t\t\t36 container\n\t\t\t\t37 버튼 테스트_사용자\n\t\t\t\t38 link [오늘, 오전 10:10](https://example.slack.com/archives/COTHER/p1790903400000000?thread_ts=1790895609.247049)\n\t\t\t\t39 텍스트, Value: 다른 채널 댓글'
+              tree=${tree/$'\n\t34 버튼 피드백 제공'/$extra$'\n\t34 버튼 피드백 제공'}
+              total=2; [[ ${PASTE_MODE:-} != search-incomplete ]] || total=12
+              tree=${tree/$'\t22 텍스트, Value: 1'/$'\t22 텍스트, Value: '"$total"} ;;
+            search-other-author) tree=${tree/$'\t\t\t\t\t28 버튼 테스트_사용자'/$'\t\t\t\t\t28 버튼 테스트_사용자_동명이인'} ;;
+            search-unknown-author) tree=${tree/$'\t\t\t\t\t28 버튼 테스트_사용자'/$'\t\t\t\t\t28 텍스트, Value: 테스트_사용자'} ;;
+            search-bad-url) tree=${tree//thread_ts=1790895609.247049/thread_ts=unknown} ;;
+            search-format) tree=${tree/내용 목록 채널의 메시지 결과/내용 목록 바뀐 결과} ;;
+            *)
+              tree=${tree%%$'\n\t22'*}
+              tree+=$'\n\t24 내용 목록 채널의 메시지 결과\n\t\t25 container\n\t\t\t26 텍스트, Value: 찾은 결과가 없습니다' ;;
+          esac
+        else
+          tree=$(jq -r '.result.snapshot.treeText' "$FIXTURES/slack-search-results.json")
+          if [[ ${SEARCH_MODE:-} == cutoff || ${SEARCH_MODE:-} == malformed-url ]]; then
+            url='https://slack.example/archives/C1/p1790521200000000'; text='오늘 자정 작업'
+            if [[ $SEARCH_MODE == malformed-url ]]; then url='https://slack.example/archives/C1/not-a-timestamp'; text='해석할 수 없는 메시지'; fi
+            extra=$'\n\t\t\t40 container 테스트_사용자: 추가 작업\n\t\t\t\t41 container\n\t\t\t\t\t42 버튼 테스트_사용자\n\t\t\t\t\t43 link [오늘, 오전 12:00]('"$url"$')\n\t\t\t\t\t44 container, Text: '"$text"
+            tree=${tree/$'\n\t\t37 버튼 피드백 제공'/$extra$'\n\t\t37 버튼 피드백 제공'}
+          fi
+          if [[ ${SEARCH_MODE:-} == empty ]]; then tree=$'[5] 버튼 검색: from:@테스트_사용자 after:2026-09-24\n[6] 버튼 검색 지우기\n18 container 검색\n\t21 내용 목록 메시지 결과, 1/1페이지\n\t\t22 container\n\t\t\t23 텍스트, Value: 찾은 결과가 없습니다'; fi
+          if [[ ${SEARCH_MODE:-} == no-channel-label ]]; then tree=${tree//$'\t\t\t\t\t28 스레드: #제품'/}; tree=${tree//$'\t\t\t\t\t36 스레드: #개발'/}; fi
+        fi
+        [[ ! -f $STAGE.cleared ]] || tree=${tree/$'\n6 버튼 검색 지우기'/} ;;
       channel|reveal)
         day=오늘; [[ ${PASTE_MODE:-} == old ]] && day=어제
         if [[ ${PASTE_MODE:-} == workflow ]]; then
@@ -180,17 +210,25 @@ case $2 in
           # "스레드의 댓글": both must resolve to the single post and its reply action.
           tree=$'[30] container 스크럼-예제팀: 예제팀 일일 업무\n\t[34] container\n\t\t[35] 버튼 스크럼-예제팀\n\t\t[36] 텍스트, Value: 워크플로\n\t\t[32] link [오늘, 오전 8:00:01](https://slack.example/today)\n\t\t[37] container, Text: 예제팀 일일 업무'
           [[ $stage != reveal ]] || tree+=$'\n\t\t[38] container 메시지 작업\n\t\t\t[33] 버튼 스레드의 댓글'
+          tree=${tree//https:\/\/slack.example\/today/https:\/\/example.slack.com\/archives\/CEXAMPLE\/p1790895609247049}
         else
-          tree="[30] container, Text: 스크럼-예제팀: 예제팀"$'\n'"[32] link [$day, 오전 8:00:01](https://slack.example/today)"
-          if [[ ${PASTE_MODE:-} == scrolled* ]]; then tree=${tree//https:\/\/slack.example\/today/https:\/\/slack.example\/archives\/C1\/p1790895609247049}; fi
-          if [[ ${PASTE_MODE:-} == zero || ${PASTE_MODE:-} == no-reply ]]; then
-            if [[ $stage == reveal && ${PASTE_MODE:-} == zero ]]; then tree+=$'\n[33] 버튼 스레드에서 답장'; fi
+          tree="[30] container, Text: 스크럼-예제팀: 예제팀"$'\n'"[32] link [$day, 오전 8:00:01](https://example.slack.com/archives/CEXAMPLE/p1790895609247049)"
+          if [[ ${PASTE_MODE:-} == search-root-changed && -f $STAGE.searched ]]; then tree=${tree//p1790895609247049/p1790895608539999}; fi
+          if [[ ${PASTE_MODE:-} == zero || ${PASTE_MODE:-} == reply-label || ${PASTE_MODE:-} == no-reply ]]; then
+            if [[ $stage == reveal ]]; then
+              [[ ${PASTE_MODE:-} != zero ]] || tree+=$'\n[33] 버튼 스레드에서 답장'
+              [[ ${PASTE_MODE:-} != reply-label ]] || tree+=$'\n[33] 버튼 스레드에 댓글 달기'
+            fi
+          elif [[ ${PASTE_MODE:-} == partial* || ${PASTE_MODE:-} == search-* ]]; then
+            tree+=$'\n[31] 버튼 12개의 댓글'
           else tree+=$'\n[31] 버튼 2개의 댓글'; fi
+          if [[ -f $STAGE.searched ]]; then tree=${tree/$'\n[31]'/$'\n[61]'}; fi
           if [[ ${PASTE_MODE:-} == multi ]]; then tree+=$'\n[50] container, Text: 스크럼-예제팀: 예제팀\n[51] link [오늘, 오전 8:02:01](https://slack.example/other)\n[52] 버튼 5개의 댓글'; fi
         fi
         tree+=$'\n[39] container, Text: 공지\n[53] link [오늘, 오전 9:00:01](https://slack.example/notice)\n[52] 버튼 5개의 댓글' ;;
       thread|focused)
         tree=$'[40] container, Text: daily-scrum 채널의 스레드\n[45] container, Text: 스크럼-예제팀: 예제팀\n[46] link [오늘, 오전 8:03:01](https://slack.example/today)\n[42] 내용 목록 daily-scrum의 스레드 (채널)'
+        tree=${tree//https:\/\/slack.example\/today/https:\/\/example.slack.com\/archives\/CEXAMPLE\/p1790895609247049}
         [[ ${PASTE_MODE:-} != workflow ]] || tree=${tree/$'\n[46]'/$'\n[49] 버튼 스크럼-예제팀\n[46]'}
         [[ ${PASTE_MODE:-} != wrong-root ]] || tree=$'[40] container, Text: daily-scrum 채널의 스레드\n[45] container, Text: 공지\n[46] link [오늘, 오전 9:00:01](https://slack.example/notice)'
         polls=$(cat "$STAGE.polls" 2>/dev/null || echo 0); polls=$((polls+1)); echo "$polls" > "$STAGE.polls"
@@ -205,25 +243,15 @@ case $2 in
         [[ ${PASTE_MODE:-} != checkbox-paste || ! -e $STAGE.pasted ]] || checked=1
         [[ ${PASTE_MODE:-} != initially-checked ]] || checked=1
         tree+=$'\n'"[47] 체크상자 #daily-scrum(으)로도 전송, Value: $checked"
-        if [[ ${PASTE_MODE:-} == scrolled* ]]; then
-          page=$(cat "$STAGE.scroll-page" 2>/dev/null || echo -1)
-          fixture=slack-thread-partial.json
-          if ((page==0)); then fixture=slack-thread-top.json
-          elif ((page==1)); then fixture=slack-thread-middle.json
-          elif ((page>=2)); then fixture=slack-thread-bottom.json; fi
-          tree=$(jq -r '.result.snapshot.treeText' "$FIXTURES/$fixture")
-          if [[ $PASTE_MODE == scrolled-nonempty ]]; then tree=${tree//스레드에 댓글 남기기/스레드에 댓글 남기기, Value: 기존 초안}; fi
-          if [[ $PASTE_MODE == scrolled-incomplete ]]; then tree=${tree//3개의 댓글/4개의 댓글}; fi
-          if [[ $PASTE_MODE == scrolled-own && $page == 1 ]]; then tree=${tree//동료_사용자/테스트_사용자}; fi
-          if [[ $PASTE_MODE == scrolled-wrong-ts && $page -ge 1 ]]; then tree=${tree//1790895609.247049/1790895608.539999}; fi
-          if [[ $PASTE_MODE == scrolled-duplicate && $page -ge 1 ]]; then
-            tree=${tree//p1790902250238009/p1790900107945519}
-            tree=${tree//p1790903400000000/p1790900107945519}
-          fi
+        if [[ ${PASTE_MODE:-} == partial* || ${PASTE_MODE:-} == search-* ]]; then
+          tree=$(jq -r '.result.snapshot.treeText' "$FIXTURES/slack-thread-partial.json")
+          [[ ${PASTE_MODE:-} != partial-nonempty ]] || tree=${tree//스레드에 댓글 남기기/스레드에 댓글 남기기, Value: 기존 초안}
+          [[ ${PASTE_MODE:-} != partial-own ]] || tree=${tree//동료_사용자/테스트_사용자}
         fi
         [[ $stage != focused ]] || focus=44 ;;
       *) exit 87 ;;
     esac
+    if [[ ${PASTE_MODE:-} == query-special ]]; then tree=${tree//daily-scrum/$ROUTINE_SLACK_CHANNEL_NAME}; fi
     if [[ " $* " != *' --no-screenshot '* ]]; then
       [[ ${PASTE_MODE:-} != screenshot-fail ]] || exit 90
       jq -nc --arg tree "$tree" --argjson focus "$focus" '{result:{snapshot:{treeText:$tree,focusedElementId:$focus},screenshot:{path:"/tmp/stub-screenshot.png"}}}'
@@ -231,7 +259,7 @@ case $2 in
   *) exit 87 ;;
 esac
 case $action in
-  click|set-value|press-key|hotkey|scroll)
+  click|set-value|press-key|hotkey)
     if [[ ${AUTO_SELF_RESET:-0} == 1 ]]; then perl -MTime::HiRes=time -e 'printf "%.0f\n", time*1000' > "$HID_RESET_EPOCH"; fi ;;
 esac
 ORCA
@@ -247,11 +275,20 @@ cat > "$HOME/.local/bin/lsappinfo" <<'LSAPP'
 [[ ${ORIGINAL_APP_GONE:-0} == 1 ]] || printf 'ASN:0x0-0x1-"stub":\n'
 LSAPP
 chmod +x "$HOME/.local/bin/"{gh,omp,orca,open,sleep,osascript,pbcopy,pbpaste,gtimeout,lsappinfo}
-require_gh_stub() { [[ $(command -v gh) == "$HOME/.local/bin/gh" ]] || fail 'Refusing real gh'; }
-require_omp_stub() { [[ $(command -v omp) == "$HOME/.local/bin/omp" ]] || fail 'Refusing real omp'; }
+# Exported functions also keep fixed-PATH children away from GUI/LLM/network.
+open() { "$HOME/.local/bin/open" "$@"; }
+osascript() { "$HOME/.local/bin/osascript" "$@"; }
+pbcopy() { "$HOME/.local/bin/pbcopy" "$@"; }
+pbpaste() { "$HOME/.local/bin/pbpaste" "$@"; }
+orca() { "$HOME/.local/bin/orca" "$@"; }
+omp() { "$HOME/.local/bin/omp" "$@"; }
+gh() { "$HOME/.local/bin/gh" "$@"; }
+export -f open osascript pbcopy pbpaste orca omp gh
+require_gh_stub() { [[ $(type -P gh) == "$HOME/.local/bin/gh" ]] || fail 'Refusing real gh'; }
+require_omp_stub() { [[ $(type -P omp) == "$HOME/.local/bin/omp" ]] || fail 'Refusing real omp'; }
 require_gui_stubs() {
   local cmd
-  for cmd in orca open osascript pbcopy pbpaste; do [[ $(command -v "$cmd") == "$HOME/.local/bin/$cmd" ]] || fail "Refusing real $cmd"; done
+  for cmd in orca open osascript pbcopy pbpaste; do [[ $(type -P "$cmd") == "$HOME/.local/bin/$cmd" ]] || fail "Refusing real $cmd"; done
 }
 require_gh_stub; require_omp_stub; require_gui_stubs
 # Run production JXA against a private named board, never the general clipboard.
@@ -400,26 +437,21 @@ printf '%s\n' \
   '\t\t\t\t\t217 link [오늘, 오전 8:00:09](https://slack.example/product)' '\t\t\t\t\t219 버튼 3개의 댓글' \
   '\t221 container' | sed 's/\\t/\t/g' > "$sandbox/bare-index-tree"
 jq -L "$repo/share" -Rse 'include "slack"; scrum_block|.reply==219 and .container==212' "$sandbox/bare-index-tree" >/dev/null || fail 'Bare-index Orca tree not recognized'
-# Long threads scroll the root out of the panel: accept only when every comment is visible and carries the root thread_ts.
+# The root may be off screen, but every visible reply must carry its thread_ts.
 printf '%s\n' \
-  '\t266 container daily-scrum 채널의 스레드' '\t\t273 내용 목록 daily-scrum의 스레드 (채널, 2개의 댓글)' \
+  '\t266 container daily-scrum 채널의 스레드' '\t\t273 내용 목록 daily-scrum의 스레드 (채널, 12개의 댓글)' \
   '\t\t\t276 버튼 동료_사용자' '\t\t\t278 link [오늘, 오전 9:15:07. 채널에서 열기](https://slack.example/archives/C1/p1790900107945519?thread_ts=1790895609.247049&cid=C1)' \
   '\t\t\t310 link [오늘, 오전 9:50:50. 채널에서 열기](https://slack.example/archives/C1/p1790902250238009?thread_ts=1790895609.247049&cid=C1)' \
   '\t\t412 텍스트 엔트리 영역 (settable) daily-scrum 스레드에 댓글 남기기' \
-  '\t\t416 체크박스 (settable) daily-scrum(으)로도 전송, Value: 0' '\t430 팝업 버튼 사용자: 테스트_사용자' | sed 's/\\t/\t/g' > "$sandbox/scrolled-thread"
-jq -L "$repo/share" -Rse 'include "slack"; thread_matches_root("https://slack.example/archives/C1/p1790895609247049"; true)' "$sandbox/scrolled-thread" >/dev/null || fail 'Scrolled thread with matching thread_ts rejected'
-jq -L "$repo/share" -Rse 'include "slack"; sub("daily-scrum\\(으\\)로도 전송";"(으)로도 전송 daily-scrum") | (try broadcast_checkbox catch null)==null' "$sandbox/scrolled-thread" >/dev/null || fail 'Reordered channel broadcast label accepted'
-jq -L "$repo/share" -Rse 'include "slack"; thread_matches_root("https://slack.example/archives/C1/p1790895608539999"; false)|not' "$sandbox/scrolled-thread" >/dev/null || fail 'Other post thread accepted'
-sed 's/2개의 댓글/3개의 댓글/' "$sandbox/scrolled-thread" | jq -L "$repo/share" -Rse 'include "slack"; (thread_matches_root("https://slack.example/archives/C1/p1790895609247049"; true)|not) and thread_matches_root("https://slack.example/archives/C1/p1790895609247049"; false)' >/dev/null || fail 'Partially visible comments must fail only the completeness check'
-jq -L "$repo/share" -Rse 'include "slack"; (own_comment|not) and thread_editor.value==""' "$sandbox/scrolled-thread" >/dev/null || fail 'Account menu taken as own comment or empty settable editor rejected'
-sed 's/버튼 동료_사용자/버튼 테스트_사용자/' "$sandbox/scrolled-thread" | jq -L "$repo/share" -Rse 'include "slack"; own_comment' >/dev/null || fail 'Own comment missed'
-# Root visible but an older comment scrolled out: identified, yet not complete for the duplicate check.
-printf '%s\n' \
-  '\t266 container daily-scrum 채널의 스레드' '\t\t273 내용 목록 daily-scrum의 스레드 (채널, 2개의 댓글)' \
-  '\t\t\t274 container 스크럼-예제팀: 예제팀 일일 업무를 작성해주세요.' '\t\t\t\t278 link [오늘, 오전 8:00:09](https://slack.example/archives/C1/p1790895609247049)' \
-  '\t\t\t310 link [오늘, 오전 9:50:50. 채널에서 열기](https://slack.example/archives/C1/p1790902250238009?thread_ts=1790895609.247049&cid=C1)' \
-  | sed 's/\\t/\t/g' > "$sandbox/root-partial-thread"
-jq -L "$repo/share" -Rse 'include "slack"; (thread_matches_root("https://slack.example/archives/C1/p1790895609247049"; true)|not) and thread_matches_root("https://slack.example/archives/C1/p1790895609247049"; false)' "$sandbox/root-partial-thread" >/dev/null || fail 'Root-visible thread with hidden comments passed the completeness check'
+  '\t\t416 체크박스 (settable) daily-scrum(으)로도 전송, Value: 0' '\t430 팝업 버튼 사용자: 테스트_사용자' | sed 's/\\t/\t/g' > "$sandbox/hidden-root-thread"
+for root in p1790895609247049 p1790895608539999; do
+  expected=true; [[ $root != p1790895608539999 ]] || expected=false
+  jq -L "$repo/share" -Rse --arg root "$root" --argjson expected "$expected" 'include "slack"; thread_identified("https://slack.example/archives/C1/"+$root)==$expected' "$sandbox/hidden-root-thread" >/dev/null || fail 'Visible reply thread_ts did not identify the correct root'
+done
+jq -L "$repo/share" -Rse 'include "slack"; sub("daily-scrum\\(으\\)로도 전송";"(으)로도 전송 daily-scrum") | (try broadcast_checkbox catch null)==null' "$sandbox/hidden-root-thread" >/dev/null || fail 'Reordered channel broadcast label accepted'
+jq -L "$repo/share" -Rse 'include "slack"; (own_comment|not) and thread_editor.value==""' "$sandbox/hidden-root-thread" >/dev/null || fail 'Account menu taken as own comment or empty settable editor rejected'
+sed 's/버튼 동료_사용자/버튼 테스트_사용자/' "$sandbox/hidden-root-thread" | jq -L "$repo/share" -Rse 'include "slack"; own_comment' >/dev/null || fail 'Own visible comment missed'
+jq -L "$repo/share" -e 'include "slack"; tree_text|thread_identified("https://example.slack.com/archives/CEXAMPLE/p1790895609247049")' "$FIXTURES/slack-thread-partial.json" >/dev/null || fail 'Root-visible partial thread rejected'
 jq -L "$repo/share" -ne 'include "slack"; ["link [오늘, 오전 8:00](https://slack.example/p1)","link [어제, 오후 10:03:01](https://slack.example/p2)","link [9월 28일, 오전 8:01](https://slack.example/p3)"]|all(.[];timestamp_link)' >/dev/null || fail 'Exact timestamp link rejected'
 jq -L "$repo/share" -ne 'include "slack"; ["link [오늘 배포 오전 8:00](https://slack.example/task)","link [작업 8:00](https://slack.example/task)","link [금요일, 오전 8:00](https://slack.example/task)"]|all(.[];timestamp_link|not)' >/dev/null || fail 'Arbitrary time mention treated as message timestamp'
 # Prioritize result reports, preserve recent context and isolate each indexed proof.
@@ -460,9 +492,17 @@ if ROUTINE_ALLOW_GUI=0 "$repo/bin/scrum-collect" --sources slack --out "$sandbox
 jq -e '.sources.slack==false and .slack==[] and .errors==[{source:"slack",message:"GUI source skipped"}]' "$sandbox/collect/2026-09-28.json" >/dev/null || fail 'GUI skip not recorded'
 [[ ! -s $CALLS ]] || fail 'GUI skip invoked a command'
 require_gui_stubs
-ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-collect" --sources slack --out "$sandbox/collect"
+ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-collect" --sources slack --since 2026-09-25 --out "$sandbox/collect"
 jq -e '.slack==[{ts_text:"금요일, 오전 9:00",url:"https://slack.example/archives/C1/p1790294400000000",channel:"#제품",text:"운영 배포 완료 [REDACTED]"},{ts_text:"금요일, 오전 9:05",url:"https://slack.example/archives/C1/p1790294700000000",channel:"#개발",text:"다음 작업"}] and .errors==[]' "$sandbox/collect/2026-09-28.json" >/dev/null || fail 'Slack first page parse or redact'
 ! grep -q 'press-key' "$CALLS" || fail 'Preferred suggestion sent Return'
+[[ $(cat "$STAGE.query") == 'from:me after:2026-09-24' ]] || fail 'Collection query changed'
+SEARCH_MODE=no-channel-label ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-collect" --sources slack --out "$sandbox/collect"
+jq -e '.sources.slack==true and (.slack|map(.channel))==["",""] and (.slack|map(.text))==["운영 배포 완료 [REDACTED]","다음 작업"]' "$sandbox/collect/2026-09-28.json" >/dev/null || fail 'Absent search channel labels failed collection'
+: > "$CALLS"
+SEARCH_MODE=prior ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-collect" --sources slack --out "$sandbox/collect"
+jq -e '.sources.slack==true and (.slack|map(.url))==["https://slack.example/archives/C1/p1790294400000000","https://slack.example/archives/C1/p1790294700000000"]' "$sandbox/collect/2026-09-28.json" >/dev/null || fail 'Prior search or background channel contaminated collection'
+grep -q 'click .*--element-index 6 ' "$CALLS" || fail 'Search term not cleared'
+[[ $(cat "$STAGE") == channel ]] || fail 'Collection did not return to channel'
 SEARCH_MODE=cutoff ROUTINE_COLLECT_UNTIL=today_start ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-collect" --sources slack --out "$sandbox/collect"
 jq -e '(.slack|map(.url))==["https://slack.example/archives/C1/p1790294400000000","https://slack.example/archives/C1/p1790294700000000"] and .window.until=="2026-09-27T15:00:00Z" and .errors==[]' "$sandbox/collect/2026-09-28.json" >/dev/null || fail 'Slack search leaked today-midnight activity into yesterday'
 SEARCH_MODE=malformed-url ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-collect" --sources slack --out "$sandbox/collect"
@@ -487,16 +527,17 @@ if SEARCH_MODE=never-search ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-collect" --sour
 "$repo/bin/scrum-draft" --date 2026-09-28 --out "$sandbox/local-only" --no-llm
 [[ ! -s $CALLS ]] || fail 'Missing JSON local mode called external tools'
 # The paste path backs up and restores even when paste or screenshot fails.
-for mode in normal zero workflow loading fail-v screenshot-fail; do
+for mode in normal zero reply-label workflow loading fail-v screenshot-fail; do
   printf 'original clipboard\n' > "$CLIPBOARD"; cp "$CLIPBOARD" "$sandbox/original"
   : > "$CALLS"
   require_gui_stubs
   if PASTE_MODE=$mode ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-paste" --no-draft > "$sandbox/paste-output" 2> "$sandbox/paste-error"; then
-    [[ $mode == normal || $mode == zero || $mode == workflow || $mode == loading ]] || fail 'Expected paste failure'
+    [[ $mode == normal || $mode == zero || $mode == reply-label || $mode == workflow || $mode == loading ]] || fail 'Expected paste failure'
   else [[ $mode == fail-v || $mode == screenshot-fail ]] || { cat "$sandbox/paste-error" >&2; fail "Paste failed: $mode"; }; fi
   cmp -s "$CLIPBOARD" "$sandbox/original" || fail "Clipboard not restored: $mode"
   ! grep -Eq 'press-key|--element-index (99|100)' "$CALLS" || fail 'Paste sent a key or clicked Send'
-  jq -Rn '[inputs] | (map(test("click.*--element-index (31|33)"))|index(true)) as $reply | (map(test("click.*--element-index 44"))|index(true)) as $editor | (map(test("hotkey.*Cmd\\+V"))|index(true)) as $paste | $reply!=null and $editor!=null and $paste!=null and $reply<$editor and $editor<$paste' < "$CALLS" | grep -Fxq true || fail 'Reply/editor/paste action sequence missing'
+  jq -Rn '[inputs] | (map(test("click.*--element-index (31|33|61)"))|index(true)) as $reply | (map(test("click.*--element-index 44"))|index(true)) as $editor | (map(test("hotkey.*Cmd\\+V"))|index(true)) as $paste | $reply!=null and $editor!=null and $paste!=null and $reply<$editor and $editor<$paste' < "$CALLS" | grep -Fxq true || fail 'Reply/editor/paste action sequence missing'
+  if [[ $mode == zero || $mode == reply-label ]]; then ! grep -q 'set-value' "$CALLS" || fail 'Zero-comment post searched'; fi
 done
 for mode in old duplicate delayed-duplicate nonempty no-reply multi wrong-root wrong-url never-ready initially-checked checkbox-click checkbox-paste background changed-target; do
   printf 'original clipboard\n' > "$CLIPBOARD"; cp "$CLIPBOARD" "$sandbox/original"; : > "$CALLS"
@@ -569,16 +610,17 @@ elif [[ $* == '-c IOHIDSystem' ]]; then
   if [[ ${AUTO_SELF_RESET:-0} == 1 && -f $HID_RESET_EPOCH ]]; then idle=$(((stamp - $(cat "$HID_RESET_EPOCH")) * 1000000)); fi
   if [[ -n ${AUTO_INPUT_AT:-} ]] && ((count >= AUTO_INPUT_AT)); then
     idle=0
+    if [[ ! -e $IDLE_COUNT.input ]]; then
+      printf 'input-at %s\n' "$count" >> "$CALLS"
+      : > "$IDLE_COUNT.input"
+    fi
     [[ -z ${AUTO_SWITCH_APP:-} ]] || echo "$AUTO_SWITCH_APP" > "$FOREGROUND"
   fi
-  if [[ -n ${AUTO_INPUT_SCROLL_AFTER:-} && $(cat "$STAGE" 2>/dev/null) == thread ]]; then
-    scrolls=$(grep -c '^orca computer scroll' "$CALLS" || true)
-    if ((scrolls>=AUTO_INPUT_SCROLL_AFTER)); then
-      idle=0
-      if [[ ! -e $IDLE_COUNT.input ]]; then
-        printf 'input-before-scroll %s\n' "$AUTO_INPUT_SCROLL_AFTER" >> "$CALLS"
-        : > "$IDLE_COUNT.input"
-      fi
+  if [[ -n ${AUTO_INPUT_SEARCH_STAGE:-} && $(cat "$STAGE" 2>/dev/null) == "$AUTO_INPUT_SEARCH_STAGE" ]]; then
+    idle=0
+    if [[ ! -e $IDLE_COUNT.input ]]; then
+      printf 'input-in-search %s\n' "$AUTO_INPUT_SEARCH_STAGE" >> "$CALLS"
+      : > "$IDLE_COUNT.input"
     fi
   fi
   printf '"HIDIdleTime" = %s\n' "$idle"
@@ -591,7 +633,7 @@ export ROUTINE_NOW='2026-09-28T09:00:00+09:00'
 cp "$result" "$sandbox/auto-draft.json"
 auto_reset() {
   rm -f -- "$out"/2026-09-28.paste* "$out/2026-09-28.draft-refresh-attempted" "$IDLE_COUNT" "$HID_RESET_EPOCH"
-  rm -f "$IDLE_COUNT.input"
+  rm -f "$IDLE_COUNT.input" "$STAGE.searched" "$STAGE.cleared"
   rm -rf -- "$out/.scrum-paste.lock" "$out/.scrum-paste.recovery.lock"
   cp "$sandbox/auto-draft.json" "$result"
   printf 'original clipboard\n' > "$CLIPBOARD"
@@ -676,9 +718,7 @@ for input_at in 2 3 4 5 6; do
   auto_reset
   AUTO_SELF_RESET=1 AUTO_INPUT_AT=$input_at run_auto
   [[ $auto_code == 4 && ! -e $out/2026-09-28.pasted && ! -e $out/2026-09-28.paste-skipped && ! -e $out/2026-09-28.paste-attention ]] || fail "Input intervention not retryable: $input_at"
-  expected=0
-  if ((input_at == 3)); then expected=1; elif ((input_at == 4)); then expected=2; elif ((input_at >= 5)); then expected=3; fi
-  [[ $(grep -Ec '^open slack://|^orca computer (click|hotkey)' "$CALLS") == "$expected" ]] || fail "Mutation ran before guard: $input_at"
+  jq -Rse --arg marker "input-at $input_at" 'split("\n") as $calls | ($calls|index($marker)) as $input | $input!=null and all($calls[$input+1:][]; test("^open |^orca computer (click|hotkey|set-value|press-key)")|not)' "$CALLS" >/dev/null || fail "Mutation ran after input guard: $input_at"
   ! grep -q 'hotkey.*Cmd+V' "$CALLS" || fail "Pasted after input intervention: $input_at"
   expected_front=com.tinyspeck.slackmacgap
   if ((input_at == 2)); then expected_front=com.apple.Terminal; fi
@@ -770,9 +810,9 @@ for source in ready collect-ready absent failed draft-false refresh-fail; do
   if [[ $source == refresh-fail ]]; then OMP_BAD=always run_auto; else AUTO_SELF_RESET=1 run_auto; fi
   [[ $auto_code == 0 && -e $out/2026-09-28.pasted ]] || fail "Slack refresh did not paste: $source"
   if [[ $source == ready || $source == collect-ready ]]; then
-    ! grep -Eq 'omp |open -a Slack' "$CALLS" || fail 'Slack-ready draft regenerated'
+    ! grep -Eq '^omp |set-value.*--value from:me after:' "$CALLS" || fail 'Slack-ready draft regenerated'
   else
-    [[ $(grep -c '^open -a Slack' "$CALLS") == 1 && -f $out/2026-09-28.draft-refresh-attempted ]] || fail 'Slack refresh count/marker not one'
+    [[ $(grep -c 'set-value.*--value from:me after:' "$CALLS") == 1 && -f $out/2026-09-28.draft-refresh-attempted ]] || fail 'Slack refresh count/marker not one'
     if [[ $source != refresh-fail ]]; then jq -e '.sources.slack==true' "$result" >/dev/null || fail 'Slack success metadata absent'; fi
   fi
   if [[ $source == collect-ready || $source == draft-false ]]; then mv "$sandbox/collect-before.json" "$out/2026-09-28.json"; fi
@@ -780,7 +820,7 @@ done
 auto_reset
 jq '.sources.slack=false' "$result" > "$sandbox/change.json"; mv "$sandbox/change.json" "$result"
 for _ in 1 2 3; do OMP_BAD=always PASTE_MODE=wrong-root run_auto; [[ $auto_code == 1 ]] || fail 'Retryable model/thread failure changed'; done
-[[ $(grep -c '^open -a Slack' "$CALLS") == 1 && $(grep -c '^omp ' "$CALLS") == 2 ]] || fail 'Slack regeneration exceeded daily one-attempt cap'
+[[ $(grep -c 'set-value.*--value from:me after:' "$CALLS") == 1 && $(grep -c '^omp ' "$CALLS") == 2 ]] || fail 'Slack regeneration exceeded daily one-attempt cap'
 # Input detection in collect propagates exit 4 and never spends an LLM call.
 for input_at in 2 3 4 5; do
   auto_reset
@@ -808,42 +848,57 @@ auto_reset
 ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-paste" --no-draft > "$sandbox/manual-paste"
 [[ -f $out/2026-09-28.pasted ]] || fail 'Manual success did not record completion'
 : > "$CALLS"; run_auto; no_auto_gui manual-completed
-for mode in scrolled-nonempty scrolled-own scrolled scrolled-incomplete scrolled-wrong-ts scrolled-duplicate; do
+# Search catches an off-screen own reply before the thread opens; partial visible
+# replies no longer require traversal. Exact author/channel/root comparisons matter.
+for mode in search-own search-own-incomplete search-other search-other-author search-unknown-author search-incomplete search-fail search-format search-bad-url search-root-changed partial partial-own partial-nonempty; do
   auto_reset
+  if [[ $mode == search-incomplete || $mode == search-fail || $mode == search-format || $mode == search-bad-url ]]; then rm -rf -- "$capture_dir"; fi
   AUTO_SELF_RESET=1 PASTE_MODE=$mode run_auto
+  [[ $(cat "$STAGE.query") == 'from:me in:#daily-scrum on:2026-09-28' ]] || fail "Wrong duplicate search query: $mode"
+  ! grep -Eq 'computer scroll|press-key|--element-index (99|100)' "$CALLS" || fail 'Duplicate check scrolled or sent a message'
+  [[ $(cat "$CLIPBOARD") == 'original clipboard' ]] || fail "Duplicate path changed clipboard: $mode"
   case $mode in
-    scrolled-nonempty)
-      [[ $auto_code == 3 && -f $out/2026-09-28.paste-skipped && $(grep -c '^orca computer scroll' "$CALLS") == 0 ]] || fail 'Existing partial-thread draft scrolled or retried'
-      grep -Fq 'reason=입력창에 이미 내용 있음' "$out/2026-09-28.paste-skipped" || fail 'Existing draft terminal reason wrong' ;;
-    scrolled-own)
-      [[ $auto_code == 3 && -f $out/2026-09-28.paste-skipped && $(grep -c '^orca computer scroll' "$CALLS") == 2 ]] || fail 'Own comment on another page missed'
-      ! grep -q 'hotkey' "$CALLS" || fail 'Own scrolled comment pasted again' ;;
-    scrolled)
-      [[ $auto_code == 0 && -f $out/2026-09-28.pasted && $(grep -c '^orca computer scroll' "$CALLS") == 3 ]] || fail 'Reply URL union did not prove complete thread'
-      grep -q 'scroll .*--direction up --pages 20' "$CALLS" || fail 'Thread scan did not start at top' ;;
-    scrolled-incomplete|scrolled-duplicate)
-      [[ $auto_code == 1 && ! -e $out/2026-09-28.pasted && $(grep -c '^orca computer scroll' "$CALLS") == 13 ]] || fail 'Incomplete/duplicate URL union accepted or unbounded' ;;
-    scrolled-wrong-ts)
-      [[ $auto_code == 1 && ! -e $out/2026-09-28.pasted ]] || fail 'Another thread page accepted' ;;
+    search-own|search-own-incomplete)
+      [[ $auto_code == 3 && -f $out/2026-09-28.paste-skipped && ! -e $out/2026-09-28.pasted ]] || fail 'Search missed off-screen own reply'
+      grep -Fq 'reason=이미 본인 댓글이 있습니다' "$out/2026-09-28.paste-skipped" || fail 'Search duplicate reason missing'
+      ! grep -Eq 'hotkey|click .*--element-index (31|61)' "$CALLS" || fail 'Duplicate search opened thread or pasted' ;;
+    search-other|search-other-author|search-unknown-author|partial)
+      [[ $auto_code == 0 && -f $out/2026-09-28.pasted ]] || fail "Unrelated search result prevented safe paste: $mode"
+      grep -q 'click .*--element-index 61 ' "$CALLS" || fail 'Search did not re-identify the changed reply index'
+      grep -q 'click .*--element-index 6 ' "$CALLS" || fail 'Search query not cleared'
+      grep -q 'click .*--element-index 21 ' "$CALLS" || fail 'Channel search panel not closed' ;;
+    partial-own|partial-nonempty)
+      [[ $auto_code == 3 && -f $out/2026-09-28.paste-skipped && ! -e $out/2026-09-28.pasted ]] || fail 'Visible duplicate/pending input bypassed'
+      ! grep -q 'hotkey' "$CALLS" || fail 'Visible duplicate or pending input pasted' ;;
+    *)
+      [[ $auto_code == 1 && ! -e $out/2026-09-28.pasted ]] || fail "Unverifiable search/root accepted: $mode"
+      ! grep -Eq 'hotkey|click .*--element-index (31|61)' "$CALLS" || fail 'Failed search/root opened thread or pasted'
+      if [[ $mode != search-root-changed ]]; then
+        captures=("$capture_dir"/[0-9]*-[0-9]*-[0-9]*.txt)
+        grep -q '^# routine 검색/' "${captures[@]}" || fail 'Search failure did not save masked diagnostic'
+        ! grep -Eq '테스트_사용자|기존 댓글|내 댓글 본문|from:@' "${captures[@]}" || fail 'Search diagnostic leaked author/body/query'
+      fi ;;
   esac
 done
-for before_scroll in 0 1 2; do
+for search_stage in search combo query results; do
   auto_reset
-  AUTO_SELF_RESET=1 AUTO_INPUT_SCROLL_AFTER=$before_scroll PASTE_MODE=scrolled run_auto
-  scroll_count=$(grep -c '^orca computer scroll' "$CALLS" || true)
-  [[ $auto_code == 4 && $scroll_count == "$before_scroll" && ! -e $out/2026-09-28.pasted ]] || fail "Input before scroll $before_scroll: exit=$auto_code, scrolls=$scroll_count"
-  jq -Rse --arg marker "input-before-scroll $before_scroll" 'split("\n") as $calls | ($calls|index($marker)) as $input | $input!=null and all($calls[$input+1:][]; test("^orca computer (scroll|click|hotkey|set-value|press-key)")|not)' "$CALLS" >/dev/null || fail 'Scroll, click or Cmd+V followed the injected input'
+  AUTO_SELF_RESET=1 AUTO_INPUT_SEARCH_STAGE=$search_stage PASTE_MODE=partial run_auto
+  [[ $auto_code == 4 && ! -e $out/2026-09-28.pasted && ! -e $out/2026-09-28.paste-skipped ]] || fail "Search input did not interrupt: $search_stage"
+  jq -Rse --arg marker "input-in-search $search_stage" 'split("\n") as $calls | ($calls|index($marker)) as $input | $input!=null and all($calls[$input+1:][]; test("^orca computer (scroll|click|hotkey|set-value|press-key)")|not)' "$CALLS" >/dev/null || fail 'GUI mutation followed search input'
 done
 auto_reset
-PASTE_MODE=scrolled ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-paste" --no-draft > "$sandbox/manual-scrolled"
-[[ -f $out/2026-09-28.pasted && $(grep -c '^orca computer scroll' "$CALLS") == 3 ]] || fail 'Manual partial-thread traversal differs'
+PASTE_MODE=search-other ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-paste" --no-draft > "$sandbox/manual-search"
+[[ -f $out/2026-09-28.pasted && $(cat "$CLIPBOARD") == 'original clipboard' ]] || fail 'Manual search path lost completion/clipboard'
 for override in force replace; do
   auto_reset
-  mode=scrolled-own
-  [[ $override != replace ]] || mode=scrolled-nonempty
-  PASTE_MODE=$mode ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-paste" --no-draft "--$override" > "$sandbox/manual-$override-scrolled"
-  [[ -f $out/2026-09-28.pasted ]] || fail "Explicit manual --$override failed on partial thread"
+  mode=search-own
+  [[ $override != replace ]] || mode=partial-nonempty
+  PASTE_MODE=$mode ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-paste" --no-draft "--$override" > "$sandbox/manual-$override-search"
+  [[ -f $out/2026-09-28.pasted && $(cat "$CLIPBOARD") == 'original clipboard' ]] || fail "Explicit manual --$override failed on partial thread"
 done
+auto_reset
+ROUTINE_SLACK_CHANNEL_NAME='daily "scrum"\ops:danger' PASTE_MODE=query-special ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-paste" --no-draft > "$sandbox/manual-query"
+[[ $(cat "$STAGE.query") == 'from:me in:"#daily \"scrum\"\\ops:danger" on:2026-09-28' && -f $out/2026-09-28.pasted ]] || fail 'Channel search modifier was not safely quoted'
 auto_reset
 PASTE_MODE=old AUTO_CLOCK=0859 run_auto
 [[ $auto_code == 1 && ! -e $out/2026-09-28.paste-skipped ]] || fail 'Missing scrum post terminated before 09:00'
