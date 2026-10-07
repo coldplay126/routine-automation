@@ -57,7 +57,21 @@ def visible_label_checks:
     {key:$key,present:($tree|contains($labels[$key])),
      required:(if $key=="search" then $main elif $key=="combo" then $search else $thread end)});
 def ax_index($pattern): [ax_lines[]|select(.index!=null and (.body|test($pattern)))|.index]|if length==1 then .[0] else error("Ambiguous or missing accessibility target: "+$pattern) end;
-def timestamp_link: test("^link \\[(오늘|어제|[0-9]{1,2}월 [0-9]{1,2}일), (오전|오후) [0-9]{1,2}:[0-9]{2}(:[0-9]{2})?\\]\\(https?://[^)]+\\)$");
+# The workspace search button lives in the window's first toolbar (top bar). Pages such as
+# activity or files have their own "검색" buttons further down; after a search the top button
+# reads "검색: <query>". With several candidates, only the one in the top bar counts.
+def global_search_button:
+  ax_lines as $lines |
+  [range(0;$lines|length)|select($lines[.].index!=null and ($lines[.].body|test("^버튼 검색(: .*)?$")))] as $hits |
+  if ($hits|length)==1 then $lines[$hits[0]].index
+  else
+    ([range(0;$lines|length)|select($lines[.].index!=null and ($lines[.].body|test("^툴바( |$)")))][0]) as $t |
+    (if $t==null then [] else
+      ([$lines[$t+1:]|to_entries[]|select(.value.indent<=$lines[$t].indent)|.key+$t+1][0] // ($lines|length)) as $end |
+      [$hits[]|select(.>$t and .<$end)] end) as $top |
+    if ($top|length)==1 then $lines[$top[0]].index else error("Ambiguous or missing accessibility target: 상단 검색 버튼") end end;
+# A post's own time link. Inside the thread panel Slack labels the root "…. 채널에서 열기" too.
+def timestamp_link: test("^link \\[(오늘|어제|[0-9]{1,2}월 [0-9]{1,2}일), (오전|오후) [0-9]{1,2}:[0-9]{2}(:[0-9]{2})?(\\. 채널에서 열기)?\\]\\(https?://[^)]+\\)$");
 # Never parse links from the channel/thread panes behind the search surface.
 def search_list_label: test("^내용 목록 (채널의 메시지 결과|메시지 결과(?:, [0-9]+/[0-9]+페이지)?)$");
 def search_surface_lines:

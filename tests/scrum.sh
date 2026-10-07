@@ -145,6 +145,8 @@ case $2 in
       search)
         tree='[5] 버튼 검색'
         if [[ ${SEARCH_MODE:-} == prior ]]; then tree=$'[5] 버튼 검색: from:@테스트_사용자 on:2026-09-27\n[6] 버튼 검색 지우기\n[7] 버튼 채널 내에서 검색'; fi
+        # An activity/files page has its own "검색" button below the top bar (seen 2026-10-07 08:16).
+        if [[ ${SEARCH_MODE:-} == page-search ]]; then tree=$'[4] 툴바 상단\n\t[5] 버튼 검색: from:@테스트_사용자 on:2026-09-27\n\t[6] 버튼 검색 지우기\n[30] container 내 활동\n\t[31] 툴바 필터\n\t\t[45] 버튼 검색'; fi
         if [[ ${SEARCH_MODE:-} == loading || ${SEARCH_MODE:-} == never-search ]]; then
           polls=$(cat "$STAGE.search.polls" 2>/dev/null || echo 0); polls=$((polls+1)); echo "$polls" > "$STAGE.search.polls"
           fixture=slack-search-loading.json
@@ -230,6 +232,8 @@ case $2 in
         tree=$'[40] container, Text: daily-scrum 채널의 스레드\n[45] container, Text: 스크럼-예제팀: 예제팀\n[46] link [오늘, 오전 8:03:01](https://slack.example/today)\n[42] 내용 목록 daily-scrum의 스레드 (채널)'
         tree=${tree//https:\/\/slack.example\/today/https:\/\/example.slack.com\/archives\/CEXAMPLE\/p1790895609247049}
         [[ ${PASTE_MODE:-} != workflow ]] || tree=${tree/$'\n[46]'/$'\n[49] 버튼 스크럼-예제팀\n[46]'}
+        # Current Slack labels the root inside the thread panel "…. 채널에서 열기" (no thread_ts).
+        [[ ${PASTE_MODE:-} != root-suffix ]] || tree=${tree/'[46] link [오늘, 오전 8:03:01]('/'[46] link [오늘, 오전 8:03:01. 채널에서 열기]('}
         [[ ${PASTE_MODE:-} != wrong-root ]] || tree=$'[40] container, Text: daily-scrum 채널의 스레드\n[45] container, Text: 공지\n[46] link [오늘, 오전 9:00:01](https://slack.example/notice)'
         polls=$(cat "$STAGE.polls" 2>/dev/null || echo 0); polls=$((polls+1)); echo "$polls" > "$STAGE.polls"
         if [[ ${PASTE_MODE:-} == loading && $polls -le 2 || ${PASTE_MODE:-} == never-ready ]]; then tree='[40] container, Text: 스레드 불러오는 중'; fi
@@ -503,6 +507,10 @@ SEARCH_MODE=prior ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-collect" --sources slack 
 jq -e '.sources.slack==true and (.slack|map(.url))==["https://slack.example/archives/C1/p1790294400000000","https://slack.example/archives/C1/p1790294700000000"]' "$sandbox/collect/2026-09-28.json" >/dev/null || fail 'Prior search or background channel contaminated collection'
 grep -q 'click .*--element-index 6 ' "$CALLS" || fail 'Search term not cleared'
 [[ $(cat "$STAGE") == channel ]] || fail 'Collection did not return to channel'
+: > "$CALLS"
+SEARCH_MODE=page-search ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-collect" --sources slack --out "$sandbox/collect"
+jq -e '.sources.slack==true and (.slack|length)==2 and .errors==[]' "$sandbox/collect/2026-09-28.json" >/dev/null || fail 'Page-level search button blocked the top-bar search'
+if ! grep -q 'click .*--element-index 5 ' "$CALLS" || grep -q 'click .*--element-index 45 ' "$CALLS"; then fail 'Clicked a page search button instead of the top bar'; fi
 SEARCH_MODE=cutoff ROUTINE_COLLECT_UNTIL=today_start ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-collect" --sources slack --out "$sandbox/collect"
 jq -e '(.slack|map(.url))==["https://slack.example/archives/C1/p1790294400000000","https://slack.example/archives/C1/p1790294700000000"] and .window.until=="2026-09-27T15:00:00Z" and .errors==[]' "$sandbox/collect/2026-09-28.json" >/dev/null || fail 'Slack search leaked today-midnight activity into yesterday'
 SEARCH_MODE=malformed-url ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-collect" --sources slack --out "$sandbox/collect"
@@ -527,12 +535,12 @@ if SEARCH_MODE=never-search ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-collect" --sour
 "$repo/bin/scrum-draft" --date 2026-09-28 --out "$sandbox/local-only" --no-llm
 [[ ! -s $CALLS ]] || fail 'Missing JSON local mode called external tools'
 # The paste path backs up and restores even when paste or screenshot fails.
-for mode in normal zero reply-label workflow loading fail-v screenshot-fail; do
+for mode in normal zero reply-label workflow root-suffix loading fail-v screenshot-fail; do
   printf 'original clipboard\n' > "$CLIPBOARD"; cp "$CLIPBOARD" "$sandbox/original"
   : > "$CALLS"
   require_gui_stubs
   if PASTE_MODE=$mode ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-paste" --no-draft > "$sandbox/paste-output" 2> "$sandbox/paste-error"; then
-    [[ $mode == normal || $mode == zero || $mode == reply-label || $mode == workflow || $mode == loading ]] || fail 'Expected paste failure'
+    [[ $mode == normal || $mode == zero || $mode == reply-label || $mode == workflow || $mode == root-suffix || $mode == loading ]] || fail 'Expected paste failure'
   else [[ $mode == fail-v || $mode == screenshot-fail ]] || { cat "$sandbox/paste-error" >&2; fail "Paste failed: $mode"; }; fi
   cmp -s "$CLIPBOARD" "$sandbox/original" || fail "Clipboard not restored: $mode"
   ! grep -Eq 'press-key|--element-index (99|100)' "$CALLS" || fail 'Paste sent a key or clicked Send'
@@ -874,7 +882,7 @@ for mode in search-own search-own-incomplete search-other search-other-author se
     *)
       [[ $auto_code == 1 && ! -e $out/2026-09-28.pasted ]] || fail "Unverifiable search/root accepted: $mode"
       ! grep -Eq 'hotkey|click .*--element-index (31|61)' "$CALLS" || fail 'Failed search/root opened thread or pasted'
-      if [[ $mode != search-root-changed && $mode != search-other-author && $mode != search-unknown-author ]]; then
+      if [[ $mode != search-root-changed ]]; then
         captures=("$capture_dir"/[0-9]*-[0-9]*-[0-9]*.txt)
         grep -q '^# routine 검색/' "${captures[@]}" || fail 'Search failure did not save masked diagnostic'
         ! grep -Eq '테스트_사용자|기존 댓글|내 댓글 본문|from:@' "${captures[@]}" || fail 'Search diagnostic leaked author/body/query'

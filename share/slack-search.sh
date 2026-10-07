@@ -24,7 +24,7 @@ slack_search_read() {
   auto_input_guard || return $?
   open -a Slack || return 1
   auto_gui_activity || return 1
-  search_index=$(poll_slack_target 'include "slack"; tree_text | ax_index("^버튼 검색(: .*)?$")') || { slack_format_notice '검색/검색 버튼' "$work/slack.state"; return 1; }
+  search_index=$(poll_slack_target 'include "slack"; tree_text | global_search_button') || { slack_format_notice '검색/검색 버튼' "$work/slack.state"; return 1; }
   auto_input_guard || return $?
   search_started=1
   "$orca" computer click --app com.tinyspeck.slackmacgap --element-index "$search_index" --no-screenshot --json >/dev/null ||
