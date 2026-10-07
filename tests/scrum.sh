@@ -455,6 +455,8 @@ done
 jq -L "$repo/share" -Rse 'include "slack"; sub("daily-scrum\\(으\\)로도 전송";"(으)로도 전송 daily-scrum") | (try broadcast_checkbox catch null)==null' "$sandbox/hidden-root-thread" >/dev/null || fail 'Reordered channel broadcast label accepted'
 jq -L "$repo/share" -Rse 'include "slack"; (own_comment|not) and thread_editor.value==""' "$sandbox/hidden-root-thread" >/dev/null || fail 'Account menu taken as own comment or empty settable editor rejected'
 sed 's/버튼 동료_사용자/버튼 테스트_사용자/' "$sandbox/hidden-root-thread" | jq -L "$repo/share" -Rse 'include "slack"; own_comment' >/dev/null || fail 'Own visible comment missed'
+# A search leaves "채널에서 검색: from:@<name> …" behind; it is not an own comment (seen 2026-10-07).
+{ cat "$sandbox/hidden-root-thread"; printf '\n[90] container, Text: 채널에서 검색: from:@테스트_사용자 in:#daily-scrum on:2026-09-28\n'; } | jq -L "$repo/share" -Rse 'include "slack"; own_comment|not' >/dev/null || fail 'Search remnant counted as own comment'
 jq -L "$repo/share" -e 'include "slack"; tree_text|thread_identified("https://example.slack.com/archives/CEXAMPLE/p1790895609247049")' "$FIXTURES/slack-thread-partial.json" >/dev/null || fail 'Root-visible partial thread rejected'
 jq -L "$repo/share" -ne 'include "slack"; ["link [오늘, 오전 8:00](https://slack.example/p1)","link [어제, 오후 10:03:01](https://slack.example/p2)","link [9월 28일, 오전 8:01](https://slack.example/p3)"]|all(.[];timestamp_link)' >/dev/null || fail 'Exact timestamp link rejected'
 jq -L "$repo/share" -ne 'include "slack"; ["link [오늘 배포 오전 8:00](https://slack.example/task)","link [작업 8:00](https://slack.example/task)","link [금요일, 오전 8:00](https://slack.example/task)"]|all(.[];timestamp_link|not)' >/dev/null || fail 'Arbitrary time mention treated as message timestamp'

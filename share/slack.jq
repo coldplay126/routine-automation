@@ -198,8 +198,12 @@ def thread_identified($url):
     (try (thread_comment_list as $list | [$list.lines[]|.body|select(reply_timestamp_link)] as $links |
       [$links[]|capture("[?&]thread_ts=(?<ts>[0-9.]+)").ts] as $tss |
       $list.count>0 and ($links|length)>0 and ($tss|length)==($links|length) and all($tss[];.==$ts)) catch false));
-# Ignore the account menu when looking for the configured user's own comments.
-def own_comment: ($ARGS.named.routine.identity.slack_display_name // "") as $name | thread_lines|any(.[]; ($name|length)>0 and (.body|contains($name) and (startswith(slack_labels.user_menu)|not)));
+# Own comment = the configured name in an author position (author button, or a message container
+# headed "<name>:"). A bare substring also hits the account menu and search remnants such as
+# "채널에서 검색: from:@<name> …" left after a search.
+def own_comment: ($ARGS.named.routine.identity.slack_display_name // "") as $name |
+  ($name|length)>0 and (thread_lines|any(.[]; .body as $b |
+    $b==("버튼 "+$name) or ($b|startswith("container "+$name+":")) or ($b|startswith("container, Text: "+$name+":"))));
 def thread_editor:
   thread_lines as $lines | [$lines[]|select(.index!=null and (.body|test(slack_labels.editor+".*(스레드|댓글)")))] |
   if length!=1 then error("스레드 입력창을 하나로 식별할 수 없습니다") else
