@@ -173,7 +173,7 @@ routine_learn() (
   [[ $(date -r "$midnight" '+%Y-%m-%d') == "$day" ]] || { echo '유효하지 않은 날짜입니다.' >&2; return 2; }
   out="$HOME/Library/Application Support/routine-automation/scrum"
   [[ -f $out/$day.draft.json ]] || { printf '%s 초안이 없습니다. 해당 날짜 routine draft가 필요합니다.\n' "$day" >&2; return 1; }
-  jq -L "$share_dir" -e 'include "scrum"; draft_ok' "$out/$day.draft.json" >/dev/null 2>&1 || { echo '초안 JSON이 유효하지 않습니다.' >&2; return 1; }
+  jq -L "$share_dir" -e 'include "scrum"; saved_draft_ok' "$out/$day.draft.json" >/dev/null 2>&1 || { echo '초안 JSON이 유효하지 않습니다.' >&2; return 1; }
   engine=$(routine_get draft.llm.engine)
   if [[ $engine == auto ]]; then
     engine=none

@@ -39,6 +39,11 @@ routine_status() {
     jq -r '"수집 기간: \(.window.since) ~ \(.window.until) (\(.window.tz // "시스템 시간대"), 상한 제외)","수집:",(["git","prs","jira","notion","slack"][] as $s|"  \($s): \(.[$s]|length)건"),"  omp_sessions: \([.sessions[]?|select(.source!="claude")]|length)건","  claude_sessions: \([.sessions[]?|select(.source=="claude")]|length)건",(.errors[]?|"  오류 [\(.source)]: \(.message)")' "$out.json"
   else echo '수집: 미실행'; fi
   if [[ -f $out.draft.json ]]; then jq -L "$share_dir" -r 'include "scrum"; delivery_counts as $counts | "초안: 전달 \($counts.delivered) · 생략 \($counts.omitted) / 확인 필요 \(.questions|length)건"' "$out.draft.json"; else echo '초안: 미실행'; fi
+  if [[ $(routine_get jira.enabled) == true ]]; then
+    # shellcheck source=jira.sh
+    source "$share_dir/jira.sh"
+    routine_jira_status || echo 'Jira 동기화: 상태 파일 확인 필요'
+  fi
   echo "전달 방식: $(routine_get delivery.mode)"
   for marker in pasted paste-attention paste-skipped copied; do
     if [[ -f $out.$marker ]]; then printf '전달 [%s]: ' "$marker"; cat "$out.$marker"; fi
@@ -87,6 +92,12 @@ routine_doctor() {
   if type -P gtimeout >/dev/null; then version=$(gtimeout --version); printf '✓ gtimeout: %s\n' "${version%%$'\n'*}"; else echo '✗ 의존성 누락: gtimeout'; errors=$((errors+1)); fi
   if [[ -d ${ROUTINE_APPLICATIONS_DIR:-/Applications}/Slack.app ]]; then echo '✓ Slack 앱'; else echo '✗ Slack 앱 누락'; errors=$((errors+1)); fi
   if routine_require_config; then echo '✓ 설정 스키마·필수값'; else errors=$((errors+1)); fi
+  if [[ $(routine_get jira.enabled) == true ]]; then
+    required=$(command jq -L "$share_dir" -r 'include "config"; jira_required_errors|join(", ")' <<< "$ROUTINE_SETTINGS")
+    if [[ -z $required ]]; then echo '✓ Jira 설정'; else printf '✗ Jira 설정: %s\n' "$required"; errors=$((errors+1)); fi
+    if security find-generic-password -s routine-automation.jira -a "$(routine_get jira.email)" >/dev/null 2>&1; then echo '✓ Jira Keychain 항목 (토큰 미조회)'
+    else echo '✗ Jira Keychain 항목 없음'; errors=$((errors+1)); fi
+  fi
   if gh auth status >/dev/null 2>&1; then echo '✓ gh 로그인'; else echo '✗ gh 로그인'; errors=$((errors+1)); fi
   engine=$(routine_get draft.llm.engine)
   if [[ $engine == auto ]]; then if command -v claude >/dev/null; then engine=claude; elif command -v omp >/dev/null; then engine=omp; else engine=none; fi; fi

@@ -2,7 +2,7 @@
 def slack_labels: {search:"버튼 검색",combo:"콤보 상자",editor:"텍스트 엔트리 영역",list:"내용 목록 ",thread_panel:" 채널의 스레드",thread_list:"의 스레드",open_channel:"채널에서 열기",comments:"개의 댓글",user_menu:"팝업 버튼 사용자:",today:"오늘, ",reply:"버튼 스레드에서 답장",broadcast:"(으)로도 전송",toolbar:"도구 막대",search_panel:"검색 결과",search_dialog:"대화상자, Title: 검색"};
 def slack_settings: $ARGS.named.routine.slack // {channel_name:"",post_title:"",post_time_prefix:"오전 8:0"};
 def today_timestamp: contains("link ["+slack_labels.today+slack_settings.post_time_prefix);
-# The hover action that opens a post's thread; Slack has used all three labels.
+# The action that opens a post's thread, available in the message toolbar or after selection.
 def reply_action: test("^버튼 (스레드에서 답장|스레드의 댓글|스레드에 댓글 달기)$");
 def tree_text: .result.snapshot.treeText // .snapshot.treeText // .treeText // error("Missing treeText");
 # Orca prints element indexes as "[12] role" (older) or "12 role" (current).
@@ -13,7 +13,9 @@ def ax_lines:
 # Every init check and the channel-name proposal use only these lines.
 def main_list_lines:
   ax_lines as $lines |
-  [range(0;$lines|length)|select($lines[.].body|test("^내용 목록 .+ \\(채널(?:[,)]|$)") and (test("의 스레드 \\(")|not))] as $starts |
+  [range(0;$lines|length)|select($lines[.].body|test("^내용 목록 .+ \\((?:비공개[[:space:]]+)?채널(?:[,)]|$)") and (test("의 스레드 \\(")|not))] as $starts |
+  ([$starts[]|select(($lines[.].body|capture("^내용 목록 (?<name>.+?)[[:space:]]+\\((?:비공개[[:space:]]+)?채널").name|sub("^\\*[[:space:]]*";"")|ltrimstr("#"))==slack_settings.channel_name)]) as $named |
+  (if ($named|length)>0 then $named else $starts end) as $starts |
   if ($starts|length)!=1 then [] else $starts[0] as $s |
     ([$lines[$s+1:]|to_entries[]|select(.value.indent<=$lines[$s].indent)|.key+$s+1][0] // ($lines|length)) as $end |
     $lines[$s:$end] end;
@@ -167,6 +169,11 @@ def scrum_blocks_for($dates):
 def scrum_blocks: scrum_blocks_for(["오늘"]);
 def scrum_block: scrum_blocks |
   if length==1 then .[0] else error("오늘 스크럼 글을 하나로 식별하지 못했습니다") end;
+# Channel navigation never borrows the duplicated root or actions from an open thread panel.
+def channel_scrum_blocks: main_list_lines |
+  if length==0 then error("채널 본문 목록을 확인하지 못했습니다") else map(.raw)|join("\n")|scrum_blocks end;
+def channel_scrum_block: channel_scrum_blocks |
+  if length==1 then .[0] else error("채널 본문에서 오늘 스크럼 글을 하나로 식별하지 못했습니다") end;
 def thread_lines:
   ax_lines as $lines | [range(0;$lines|length)|select(slack_settings.channel_name|length>0)|select($lines[.].body|contains(slack_settings.channel_name+slack_labels.thread_panel))] as $starts |
   if ($starts|length)!=1 then error("스크럼 스레드 패널을 확인하지 못했습니다") else $lines[$starts[0]:] end;

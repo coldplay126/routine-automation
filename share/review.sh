@@ -21,7 +21,7 @@ routine_review() (
   [[ -f $input ]] || { printf '%s 초안이 없습니다. routine draft --date %s를 실행하세요.\n' "$day" "$day" >&2; return 1; }
   source_file="$out/$day.json"
   [[ -f $source_file ]] || source_file=/dev/null
-  jq -L "$review_share" -e 'include "scrum"; draft_ok and (.yesterday|type=="array") and (.today|type=="array")' "$input" >/dev/null || { echo '초안 JSON이 유효하지 않습니다. 초안을 다시 생성하세요.' >&2; return 1; }
+  jq -L "$review_share" -e 'include "scrum"; saved_draft_ok and (.yesterday|type=="array") and (.today|type=="array")' "$input" >/dev/null || { echo '초안 JSON이 유효하지 않습니다. 초안을 다시 생성하세요.' >&2; return 1; }
   target_tmp=$(mktemp "$out/.$day.review.XXXXXXXX")
   trap '[[ -z $target_tmp ]] || rm -f -- "$target_tmp"' EXIT
   jq -L "$review_share" -r --arg day "$day" --slurpfile source "$source_file" --rawfile template "$review_share/review.html" 'include "review"; review_page($source[0] // {}; $day; $template)' "$input" > "$target_tmp"

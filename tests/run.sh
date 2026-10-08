@@ -393,7 +393,9 @@ if OMP_TIMEOUT=137 "$repo/bin/morning" --only omp-update > "$sandbox/killed-time
 "$repo/tests/first-run-ui.sh"
 "$repo/tests/pr-activity.sh"
 "$repo/tests/draft-completion.sh"
+"$repo/tests/projects.sh"
 "$repo/tests/review.sh"
 "$repo/tests/style.sh"
 "$repo/tests/learn.sh"
+"$repo/tests/jira.sh"
 echo 'PASS: shellcheck, collector/morning/scrum 안전 회귀, 팀 패키지 계약'

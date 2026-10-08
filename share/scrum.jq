@@ -1,4 +1,5 @@
 include "redact";
+include "config";
 def norm: gsub("[[:space:]]+"; " ") | sub("^ "; "") | sub(" $"; "");
 def active_claim($pattern):
   "("+$pattern+")(?![^[:space:][:punct:]]*[[:space:]]*(대기|후|전|여부|예정|필요|실패))";
@@ -22,9 +23,13 @@ def claim_classes:
    then "work" else empty end];
 def complete_words($section): $section=="yesterday" and (claim_classes|length)>0;
 def default_format: {bullets:["•","◦","▪","▪"],layout:"tree",max_items_per_section:null};
-def draft_settings:
-  ($ARGS.named.routine.draft // {project:"",markers:"none",categories:["현황 파악","배포","개발","인프라","업무 자동화","기타"],headers:{yesterday:"어제 작업한 내용",today:"오늘의 작업 계획"}}) |
+def normalized_draft_settings:
+  migrate_draft_projects |
+  .projects=((.projects // [])|map(.+{owners:(.owners // []),keywords:(.keywords // [])})) |
   .format=(default_format * (.format // {}));
+def draft_settings:
+  ($ARGS.named.routine.draft // {projects:[],markers:"none",categories:["현황 파악","배포","개발","인프라","업무 자동화","기타"],headers:{yesterday:"어제 작업한 내용",today:"오늘의 작업 계획"}}) |
+  normalized_draft_settings;
 def category_order: draft_settings.categories;
 def category_claim($section): norm as $category | (category_order|index($category))==null and ($category|complete_words($section));
 def strings: type=="array" and all(.[]; type=="string");
@@ -33,6 +38,9 @@ def draft_ok:
     (.section|IN("yesterday","today")) and (.path|strings and length==2 and all(.[]; norm|length>0)) and
     (.topic|type=="string" and (norm|length)>0) and (.level|IN("request","work","merged","deployed","verified")) and
     (.evidence|strings) and ((.held_ref // null)==null or (.held_ref|type=="number" and .==floor and .>=0))));
+def saved_draft_ok:
+  draft_ok and ((.settings // draft_settings|normalized_draft_settings|.projects|map(.label)) as $labels |
+    all(.items[];.project as $project|$project==null or (($project|type=="string") and ($labels|index($project)!=null))));
 def delivery_counts:
   {delivered:([.items[]?|select(.omitted!=true and (.section!="today" or .held!=true))]|length),
    omitted:([.items[]?|select(.omitted==true)]|length)};
@@ -65,11 +73,19 @@ def pr_activity($login;$since;$until):
       select($at>=($since|fromdateiso8601) and $at<($until|fromdateiso8601))) |
   unique | sort_by(.at,.kind) |
   if all(.[];.kind=="merged_by_other") and $saturated then error("Saturated PR commits: the first 100 cannot prove absence") else . end;
+def repository_owner:
+  if type!="string" then "" else
+    (try (if test("^[A-Za-z][A-Za-z0-9+.-]*://") then capture("^[A-Za-z][A-Za-z0-9+.-]*://[^/]+/(?<owner>[^/]+)/[^/]+").owner
+      elif test("^[^/]+:") then capture("^[^/]+:(?<owner>[^/]+)/[^/]+").owner
+      else capture("^(?<owner>[^/:]+)/[^/]+").owner end) catch "") // ""
+  end;
 def evidence_catalog($notes):
-  [(.git[]? | {id:("git:"+.sha),kind:"git",repo:.repo,merge:(.merge==true or (.subject|test("^Merge (pull request|branch|remote-tracking branch)"))),text:.subject}),
+  [(.git[]? | {id:("git:"+.sha),kind:"git",repo:.repo,owner:(.owner // (.repo|repository_owner)),merge:(.merge==true or (.subject|test("^Merge (pull request|branch|remote-tracking branch)"))),text:.subject}),
    (.prs[]? | (.current.state // .state|ascii_upcase) as $state |
     {id:("pr:"+.url),kind:"pr",state:$state,in_window:(if has("in_window") then .in_window else "unknown" end),
      repo:(.repository|if type=="object" then .nameWithOwner // .name else . end),
+     owner:(((.repository|if type=="object" then .nameWithOwner // .url // .name else . end)|repository_owner) as $owner |
+       if $owner!="" then $owner else (.url|repository_owner) end),
      merge:($state=="MERGED" and any(.activity[]?;.kind|IN("merged","merged_by_other"))),text:.title}),
    (.sessions[]? | select(.id!=null) | {id:session_evidence_id,kind:"session",text:(.latest_report // "")}),
    (.sessions[]? | select(.id!=null) | . as $session | (.reports // []|to_entries[]) |
@@ -77,8 +93,25 @@ def evidence_catalog($notes):
    (.slack[]? | {id:("slack:"+.url),kind:"slack",text:.text}),
    (.jira[]? | {id:("jira:"+.key),kind:"jira",text:.title}),
    ($notes.today|to_entries[]|{id:("note:"+(.key|tostring)),kind:"note",text:.value})];
-def report_proves($level):
-  [split("\n")[] | splits("[.;!。]") | gsub("\\*\\*|__";"") | norm] | any(.[];
+def item_project($item;$proof;$projects):
+  [$proof[]|select(.kind|IN("git","pr"))|.owner // ""|ascii_downcase|select(length>0)] as $owners |
+  [$item.path[],$item.topic,$proof[].text]|map(. // ""|ascii_downcase) as $texts |
+  [$projects[]|. as $p|select(any($p.owners[];ascii_downcase as $owner|$owners|index($owner)!=null))|.label] as $by_owner |
+  [$projects[]|. as $p|select(any($p.keywords[];ascii_downcase as $word|any($texts[];contains($word))))|.label] as $by_keyword |
+  (if ($by_owner|length)==1 then $by_owner[0] else null end) as $owner |
+  (if ($by_keyword|length)==1 then $by_keyword[0] else null end) as $keyword |
+  (if any($projects[];.label==$item.project) then $item.project else null end) as $model |
+  ($owner // $keyword) as $decisive |
+  {project:($decisive // $model // $projects[0].label),
+   questions:([
+     if $item.project!=null and $model==null then $item.topic+": 프로젝트 라벨 확인 필요(허용 목록 밖 값은 무시)" else empty end,
+     if ($by_owner|length)>1 then $item.topic+": 프로젝트 판정 모호(저장소: "+($by_owner|join(" vs "))+")" else empty end,
+     if $owner==null and ($by_keyword|length)>1 then $item.topic+": 프로젝트 판정 모호(키워드: "+($by_keyword|join(" vs "))+")" else empty end,
+     if $owner!=null and $keyword!=null and $owner!=$keyword then $item.topic+": 프로젝트 판정 충돌("+$owner+" vs "+$keyword+")" else empty end,
+     if $decisive!=null and $model!=null and $decisive!=$model then $item.topic+": 프로젝트 판정 충돌("+$decisive+" vs "+$model+")" else empty end
+   ]|unique)};
+def proving_sentences($level):
+  [split("\n")[] | splits("[.;!。]") | gsub("\\*\\*|__";"") | norm] | map(select(
     (test("예정|계획|남은|다음|필요|미확인|실패|불가|안 됨|않|요청|검토|pending|failed|unhealthy|[?？]|나요|여부|부탁|주세요|알려|되면|하면|다면|으면|라면|이면|어야|여야|해야|예상|목표|대기|아님|모르|정상인지|정상인[[:space:]]*(경우|때)|정상일[[:space:]]*때|(완료|배포|반영|확인|정상)[[:space:]]*면|(완료|배포|반영|확인|발송|처리|종료|적용|Synced|Healthy)[[:space:]]*(전|후)([[:space:][:punct:]]|입니다|에는|의|에|$)";"i")|not) and
     (if $level=="deployed" then
        (test("운영.*(배포|반영)") and test("(완료했습니다|완료됨|배포했습니다|반영했습니다|확인했습니다)[[:space:]]*$")) or
@@ -89,7 +122,8 @@ def report_proves($level):
        test("(이상[[:space:]]*없이[[:space:]]*진행되었습니다|모두[[:space:]]*정상|정상입니다|정상[[:space:]]*확인)[[:space:]]*$") or
        (test("^(#+[[:space:]]+.*)?✅[[:space:]]*.+") and
         test("(발송|처리|종료|반영|적용|성공|통과|완료|확인)(했습니다|되었습니다|됐습니다|됨|완료)?[[:space:]]*$"))
-     end));
+     end)));
+def report_proves($level): proving_sentences($level)|length>0;
 def supported_level($level;$proof):
   if $level=="request" then any($proof[];.kind=="session" or .kind=="note")
   elif $level=="work" then any($proof[];.kind=="git" or .kind=="pr")
@@ -134,17 +168,20 @@ def build_trees_settings($settings):
       [$group[]|select((.value.topic|norm)==(.value.path[1]|norm))|{item:.key}] +
       ([$group[]|select((.value.topic|norm)!=(.value.path[1]|norm))|{item:.key}] as $children |
        if ($children|length)>0 then [{label:($group[0].value.path[1]+uncertain_label(any($group[];.value.path_uncertain[1]==true))),children:$children}] else [] end)) | add // [];
+  def nodes:
+    if $settings.format.layout=="flat" then topics else
+      group_by(.value.path[0]) |
+      sort_by(.[0].value.path[0] as $category | [($settings.categories|index($category)//6),$category]) |
+      map({label:(.[0].value.path[0]+uncertain_label(any(.[];.value.path_uncertain[0]==true))),children:topics}) end;
   def tree($section):
-    [$items|to_entries[]|select(.value.section==$section and .value.omitted!=true and ($section!="today" or .value.held!=true))] |
-    if length==0 then [] else
-      (if $settings.format.layout=="flat" then topics else
-       group_by(.value.path[0]) |
-       sort_by(.[0].value.path[0] as $category | [($settings.categories|index($category)//6),$category]) |
-       map({label:(.[0].value.path[0]+uncertain_label(any(.[];.value.path_uncertain[0]==true))),children:topics}) end) as $nodes |
-      if $settings.project=="" then $nodes else [{label:$settings.project,children:$nodes}] end end;
+    [$items|to_entries[]|select(.value.section==$section and .value.omitted!=true and ($section!="today" or .value.held!=true))] as $eligible |
+    if ($settings.projects|length)==0 then $eligible|nodes else
+      [$settings.projects[]|.label as $project |
+       ($eligible|map(select((.value.project // $settings.projects[0].label)==$project))|nodes) as $nodes |
+       select(($nodes|length)>0)|{label:$project,children:$nodes}] end;
   .yesterday=tree("yesterday") | .today=tree("today");
 def apply_format_settings($settings):
-  ($settings | .format=(default_format * (.format // {}))) as $settings |
+  ($settings|normalized_draft_settings) as $settings |
   .settings=$settings | .questions=((.questions // []) - (.format_questions // [])) |
   .items |= map(del(.omitted)) |
   reduce ["yesterday","today"][] as $section (.;
@@ -162,6 +199,8 @@ def validate_draft($source;$notes):
     .items[$i] as $item |
     [$item.evidence[] as $id|$catalog[]|select(.id==$id)] as $all_proof |
     [$all_proof[]|select(.kind!="pr" or (if $item.section=="yesterday" then .in_window==true else .state=="OPEN" end))] as $proof |
+    item_project($item;$proof;draft_settings.projects) as $project |
+    .items[$i].project=$project.project | .questions += $project.questions |
     [$all_proof[]|select($item.section=="yesterday" and .kind=="pr" and .in_window!=true)|.id] as $outside |
     [$item.evidence[]|. as $id|select(any($catalog[];.id==$id)|not)] as $missing |
     held_index($item;$notes) as $held |
@@ -182,7 +221,7 @@ def validate_draft($source;$notes):
     ([$missing[]|"존재하지 않는 근거: "+.] + [$outside[]|"기간 내 내 활동이 확인되지 않은 PR: "+.] +
      (if $supported or ($check_claim|not) or $held_exempt then [] else ["수준 "+$item.level+"의 최소 근거 또는 완료 결과가 없습니다"] end) +
      (if $overclaim then ["주제에 완료·배포 표현이 있습니다"] else [] end)) as $reasons |
-    .items[$i].reasons=$reasons |
+    .items[$i].reasons=($reasons+[$project.questions[]|ltrimstr($item.topic+": ")]|unique) |
     .items[$i].path[0]|=norm |
     .items[$i].path_uncertain=[($check_claim and (claims_supported($category_required;$proof)|not)),($check_claim and (claims_supported($group_required;$proof)|not))] |
     if $supported|not then .items[$i].level=low_level($proof) else . end |

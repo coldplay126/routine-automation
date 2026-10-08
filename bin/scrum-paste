@@ -263,10 +263,15 @@ phase='Slack 스레드 확인'; phase_id=thread
 state() { "$orca" computer get-app-state --app com.tinyspeck.slackmacgap --no-screenshot --json > "$work/state.json"; }
 # Re-check both the current index and its exact label immediately before clicking.
 click() {
-  local index=$1 label
+  local index=$1 root=${2:-} label
   label=$(jq -L "$share_dir" -er --argjson index "$index" 'include "slack"; tree_text|ax_lines|.[]|select(.index==$index)|.body' "$work/state.json") || fail '클릭 대상 label을 확인하지 못했습니다'
   state
   jq -L "$share_dir" -e --argjson index "$index" --arg label "$label" 'include "slack"; tree_text|ax_lines|any(.[];.index==$index and .body==$label)' "$work/state.json" >/dev/null || { echo '클릭 대상이 바뀌었습니다. 중단합니다.' >&2; exit 1; }
+  if [[ -n $root ]]; then
+    jq -L "$share_dir" -e --argjson index "$index" --arg root "$root" 'include "slack"; tree_text|channel_scrum_block|
+      (any(.lines[];.index==$index)) and ([.lines[].body|select(today_timestamp)|capture("\\((?<url>https?://[^)]+)\\)").url]==[$root])' "$work/state.json" >/dev/null ||
+      fail '클릭 직전 대상이 오늘 채널 글에서 벗어났습니다'
+  fi
   auto_input_guard
   "$orca" computer click --app com.tinyspeck.slackmacgap --element-index "$index" --no-screenshot --json >/dev/null
   auto_gui_activity
@@ -304,7 +309,7 @@ open "slack://channel?team=$(routine_get slack.team_id)&id=$(routine_get slack.c
 auto_gui_activity
 sleep 3
 state
-blocks=$(jq -L "$share_dir" -ec 'include "slack"; tree_text | scrum_blocks' "$work/state.json") || { slack_format_notice '채널/스크럼 글' "$work/state.json"; fail '오늘 스크럼 글을 확인하지 못했습니다'; }
+blocks=$(jq -L "$share_dir" -ec 'include "slack"; tree_text | channel_scrum_blocks' "$work/state.json") || { slack_format_notice '채널/스크럼 글' "$work/state.json"; fail '오늘 스크럼 글을 확인하지 못했습니다'; }
 if [[ $(jq -r 'length' <<< "$blocks") == 0 ]]; then
   if ((auto)) && ((10#$clock >= 10#$no_post_after)); then terminal '오늘 스크럼 글 없음'; fi
   fail "오늘 스크럼 글 없음 — $(routine_get delivery.no_post_after)까지 재시도"
@@ -342,7 +347,7 @@ if [[ -n $reply ]]; then
   auto_gui_activity
   sleep 3
   state
-  block=$(jq -L "$share_dir" -ec 'include "slack"; tree_text|scrum_block' "$work/state.json") ||
+  block=$(jq -L "$share_dir" -ec 'include "slack"; tree_text|channel_scrum_block' "$work/state.json") ||
     { slack_format_notice '채널/검색 후 스크럼 글' "$work/state.json"; fail '검색 후 오늘 스크럼 글을 다시 식별하지 못했습니다'; }
   current_root_url=$(jq -L "$share_dir" -er 'include "slack"; .lines[].body|select(today_timestamp)|capture("\\((?<url>https?://[^)]+)\\)").url' <<< "$block") ||
     fail '검색 후 스크럼 루트 링크를 확인하지 못했습니다'
@@ -350,15 +355,36 @@ if [[ -n $reply ]]; then
   reply=$(jq -r '.reply // empty' <<< "$block")
 fi
 if [[ -n $reply ]]; then
-  click "$reply"
+  click "$reply" "$expected_root_url"
 else
-  container=$(jq -r '.container // empty' <<< "$block")
-  [[ -n $container ]] || { echo '댓글 버튼이 없습니다. 오늘 글에서 스레드에서 답장을 직접 열어 주세요.' >&2; exit 1; }
-  click "$container"
-  state
-  # Locate the revealed reply action only within the same current-day block.
-  reply=$(jq -L "$share_dir" -er 'include "slack"; tree_text | scrum_block | [.lines[]|select(.body|reply_action)|.index] | if length==1 then .[0] else error("스레드에서 답장 버튼을 직접 열어 주세요") end' "$work/state.json") || fail '스레드에서 답장 버튼을 확인하지 못했습니다'
-  click "$reply"
+  # A zero-comment post can already expose its toolbar: do not click its container first.
+  : > "$work/reply-poll-trace"
+  actions=$(jq -L "$share_dir" -c 'include "slack"; [.lines[]|select(.index!=null and (.body|reply_action))|.index]' <<< "$block")
+  reply_count=$(jq -r 'length' <<< "$actions")
+  printf 'reply poll 0: state=성공 root_match=true candidates=%s\n' "$reply_count" >> "$work/reply-poll-trace"
+  if ((reply_count==0)); then
+    container=$(jq -r '.container // empty' <<< "$block")
+    [[ -n $container ]] || { slack_format_notice '채널/답장 컨테이너' "$work/state.json" "$work/reply-poll-trace"; fail '오늘 글의 답장 컨테이너를 확인하지 못했습니다'; }
+    click "$container" "$expected_root_url"
+    for reply_poll in 1 2 3; do
+      reply_count=0
+      if ! state 2>/dev/null; then
+        printf 'reply poll %s: state=실패 candidates=미확인\n' "$reply_poll" >> "$work/reply-poll-trace"
+      elif ! block=$(jq -L "$share_dir" -ec --arg url "$expected_root_url" 'include "slack"; tree_text|channel_scrum_block |
+        select([.lines[].body|select(today_timestamp)|capture("\\((?<url>https?://[^)]+)\\)").url]==[$url])' "$work/state.json" 2>/dev/null); then
+        printf 'reply poll %s: state=성공 root_match=false candidates=미확인\n' "$reply_poll" >> "$work/reply-poll-trace"
+      else
+        actions=$(jq -L "$share_dir" -c 'include "slack"; [.lines[]|select(.index!=null and (.body|reply_action))|.index]' <<< "$block")
+        reply_count=$(jq -r 'length' <<< "$actions")
+        printf 'reply poll %s: state=성공 root_match=true candidates=%s\n' "$reply_poll" "$reply_count" >> "$work/reply-poll-trace"
+        ((reply_count!=1)) || break
+      fi
+      ((reply_poll>=3)) || sleep 0.2
+    done
+  fi
+  ((reply_count==1)) || { slack_format_notice '채널/스레드 답장 버튼' "$work/state.json" "$work/reply-poll-trace"; fail '스레드에서 답장 버튼을 하나로 확인하지 못했습니다'; }
+  reply=$(jq -r '.[0]' <<< "$actions")
+  click "$reply" "$expected_root_url"
 fi
 # Require the correct root and three consecutive stable snapshots before checking duplicates.
 # Each poll's outcome (no screen text) goes to a trace kept with any format-failure capture.

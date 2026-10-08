@@ -1,0 +1,36 @@
+#!/usr/bin/expect -f
+set timeout 45
+set wrapper [lindex $argv 0]
+set transcript [lindex $argv 1]
+set mode [lindex $argv 2]
+set action [lindex $argv 3]
+spawn /usr/bin/script -q $transcript /bin/bash $wrapper $action
+set choices 0
+while {1} {
+  expect {
+    -re {번호로 선택/해제, Enter로 확정\): } {
+      incr choices
+      if {$choices==1} {
+        if {$mode eq "close"} {send -- "1 2 3 4\r"} elseif {$mode eq "multi-edit"} {send -- "1 2\r"} else {send -- "1\r"}
+      } else {send -- "\r"}
+      exp_continue
+    }
+    -re {EDITOR_TTY_READY: } {send -- "editor-input\r"; exp_continue}
+    -re {본문을 편집할까요\? \[y/N\] } {
+      if {$mode eq "edit-decline" || $mode eq "edit-approve" || $mode eq "multi-edit"} {send -- "y\r"} else {send -- "n\r"}
+      exp_continue
+    }
+    -re {이 항목을 승인할까요\? \[y/N\] } {
+      if {$mode eq "approve" || $mode eq "edit-approve" || $mode eq "multi-edit"} {send -- "y\r"} else {send -- "n\r"}
+      exp_continue
+    }
+    -re {승인한 항목을 지금 반영할까요\? \[y/N\] } {send -- "n\r"; exp_continue}
+    -re {고른 [0-9]+건을 닫을까요\?.*\[y/N\] } {send -- "y\r"; exp_continue}
+    -re {JIRA_PTY_RC=([0-9]+)} {
+      if {$expect_out(1,string)!=0} {puts stderr "Jira PTY exit $expect_out(1,string)"; exit 1}
+      expect eof; wait; exit 0
+    }
+    eof {puts stderr "Jira PTY exit missing"; exit 1}
+    timeout {puts stderr "Jira PTY timeout $mode"; exit 1}
+  }
+}

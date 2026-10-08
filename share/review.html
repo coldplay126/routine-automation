@@ -45,6 +45,7 @@ details { border-top: 1px solid var(--border); padding-top: 10px; } details ul, 
 const data = JSON.parse(document.getElementById('review-data').textContent);
 const preview = document.getElementById('preview');
 const settings = data.settings;
+const projects = Array.isArray(settings.projects) ? settings.projects : (settings.project ? [{label: settings.project}] : []);
 const format = Object.assign({bullets: ['•', '◦', '▪', '▪'], layout: 'tree', max_items_per_section: null}, settings.format || {});
 const customBullets = JSON.stringify(format.bullets) !== JSON.stringify(['•', '◦', '▪', '▪']);
 const bullet = depth => format.bullets[Math.min(depth, format.bullets.length - 1)];
@@ -63,7 +64,10 @@ function compare(a, b) {
 data.items.forEach(item => {
   if (Array.isArray(item.path_uncertain)) return;
   let roots = data[item.section] || [];
-  if (settings.project && roots[0] && roots[0].children) roots = roots[0].children;
+  if (projects.length) {
+    const project = roots.find(node => node.label === (item.project || projects[0].label));
+    roots = project ? project.children || [] : [];
+  }
   const matches = (node, value) => node.label === value || node.label === value + ' (확인 필요)';
   const category = roots.find(node => matches(node, item.path[0]));
   const topic = category && (category.children || []).find(node => matches(node, item.path[1]));
@@ -87,15 +91,21 @@ function tree(section) {
       return direct.concat(nested.length ? [{label: label(topic, tasks, 1), children: nested}] : []);
     });
   }
-  const categories = [...new Set(visible.map(item => item.path[0]))].sort((a, b) => {
-    const rank = value => { const index = settings.categories.indexOf(value); return index < 0 ? 6 : index; };
-    return rank(a) - rank(b) || compare(a, b);
+  function nodes(items) {
+    const categories = [...new Set(items.map(item => item.path[0]))].sort((a, b) => {
+      const rank = value => { const index = settings.categories.indexOf(value); return index < 0 ? 6 : index; };
+      return rank(a) - rank(b) || compare(a, b);
+    });
+    return format.layout === 'flat' ? topics(items) : categories.map(category => {
+      const group = items.filter(item => item.path[0] === category);
+      return {label: label(category, group, 0), children: topics(group)};
+    });
+  }
+  if (!projects.length) return nodes(visible);
+  return projects.flatMap(project => {
+    const children = nodes(visible.filter(item => (item.project || projects[0].label) === project.label));
+    return children.length ? [{label: project.label, children}] : [];
   });
-  const nodes = format.layout === 'flat' ? topics(visible) : categories.map(category => {
-    const group = visible.filter(item => item.path[0] === category);
-    return {label: label(category, group, 0), children: topics(group)};
-  });
-  return settings.project && nodes.length ? [{label: settings.project, children: nodes}] : nodes;
 }
 function htmlLines(nodes, depth = 0) {
   return nodes.flatMap(node => ['&nbsp;'.repeat(depth * 2) + esc(bullet(depth)) + ' ' + esc(node.children ? node.label : node.text)]

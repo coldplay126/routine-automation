@@ -16,7 +16,7 @@ routine_installation_pending() {
   return 1
 }
 routine_installation_idle() {
-  local lock owner modified
+  local lock owner modified start current
   for lock in "$HOME/Library/Logs/routine-automation/.morning.lock" "$HOME/Library/Application Support/routine-automation/scrum/.scrum-paste.lock"; do
     [[ -d $lock ]] || continue
     owner=$(cat "$lock/pid" 2>/dev/null || true)
@@ -27,6 +27,19 @@ routine_installation_idle() {
       return 1
     fi
   done
+  lock="$HOME/Library/Application Support/routine-automation/jira/.lock"
+  if [[ -d $lock ]]; then
+    owner=$(cat "$lock/pid" 2>/dev/null || true)
+    modified=$(stat -f %m "$lock" 2>/dev/null || date +%s)
+    start=$(cat "$lock/lstart" 2>/dev/null || true)
+    current=''
+    if [[ $owner =~ ^[0-9]+$ ]]; then current=$(ps -o lstart= -p "$owner" 2>/dev/null || true); fi
+    if { [[ $owner =~ ^[0-9]+$ && -n $start && $start == "$current" ]] && kill -0 "$owner" 2>/dev/null; } ||
+       { [[ -z $owner ]] && (($(date +%s)-modified<10)); }; then
+      echo 'Jira 동기화 실행 중 — 작업 종료 후 업데이트하세요.' >&2
+      return 1
+    fi
+  fi
 }
 routine_use_install_config() {
   local storage=$installed_root stored

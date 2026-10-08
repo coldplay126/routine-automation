@@ -22,6 +22,10 @@ non_interactive=0 link='' link_timestamp='' supplied='[]' prompt_app='' origins=
 pending_values=()
 set_value() {
   local key=$1 value=$2 type
+  if [[ $key == draft.project ]]; then
+    key=draft.projects
+    value=$(command jq -L "$share_dir" -nc --arg value "$value" 'include "config"; (if $value=="null" then null else $value end)|legacy_draft_projects') || exit 2
+  fi
   type=$(command jq -r --arg key "$key" 'getpath($key|split("."))|type' <<< "$schema")
   [[ $type != null || $key == draft.llm.model || $key == timezone || $key == draft.format.max_items_per_section ]] || { echo "알 수 없는 설정: $key" >&2; exit 2; }
   case $key:$type in
@@ -64,7 +68,7 @@ while (($#)); do
       case $1 in
         --display-name) key=identity.slack_display_name ;; --git-authors) key=identity.git_authors ;; --notion-email-like) key=identity.notion_email_like ;;
         --team-id) key=slack.team_id ;; --workspace-domain) key=slack.workspace_domain ;; --channel-id) key=slack.channel_id ;; --channel-name) key=slack.channel_name ;; --post-title) key=slack.post_title ;; --post-time-prefix) key=slack.post_time_prefix ;;
-        --project) key=draft.project ;; --engine) key=draft.llm.engine ;; --model) key=draft.llm.model ;; --delivery-mode) key=delivery.mode ;;
+        --project|--draft-project) key=draft.project ;; --engine) key=draft.llm.engine ;; --model) key=draft.llm.model ;; --delivery-mode) key=delivery.mode ;;
         *) key=$(command jq -r --arg flag "${1#--}" '[paths as $p|select(getpath($p)|type!="object")|($p|join("."))|select((gsub("[._]";"-"))==$flag)][0] // empty' <<< "$schema") ;;
       esac
       [[ -n $key ]] || { echo "알 수 없는 옵션: $1" >&2; exit 2; }

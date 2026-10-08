@@ -155,3 +155,9 @@ routine uninstall --purge   # 설정·데이터·로그도 제거
 
 실행 중인 LaunchAgent의 `bootout`이 실패하면 제거를 중단합니다. 외부 파일은 manifest와 일치할 때만 제거합니다. `~/Applications/스크럼 초안 복사.app`과 `스크럼 초안 검토.app`도 설치가 소유한 경우에만 제거합니다. 앱에 추가되거나 변경된 파일이 있으면 제거를 거부합니다.
 설정 JSON이 깨져 있어도 manifest 소유 검증으로 uninstall할 수 있습니다.
+
+Jira 토큰은 Keychain에 별도로 보관하므로 `uninstall --purge`도 지우지 않습니다. 토큰까지 제거하려면 설정에 쓴 이메일로 다음 명령을 실행하세요.
+
+```bash
+security delete-generic-password -s routine-automation.jira -a "<이메일>"
+```

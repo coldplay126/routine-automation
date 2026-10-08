@@ -72,7 +72,7 @@ routine_style() (
       [[ $(date -r "$midnight" '+%Y-%m-%d') == "$day" ]] || { echo '유효하지 않은 날짜입니다.' >&2; return 2; }
       input="$out/$day.draft.json"
       [[ -f $input ]] || { printf '%s 초안이 없습니다.\n' "$day" >&2; return 1; }
-      jq -L "$share_dir" -e 'include "scrum"; draft_ok' "$input" >/dev/null || { echo '초안 JSON이 유효하지 않습니다.' >&2; return 1; }
+      jq -L "$share_dir" -e 'include "scrum"; saved_draft_ok' "$input" >/dev/null || { echo '초안 JSON이 유효하지 않습니다.' >&2; return 1; }
       jq -L "$share_dir" -r 'include "scrum"; apply_format_settings((.settings // draft_settings)|.format=draft_settings.format) | render_text' "$input" ;;
     edit)
       (($#==0)) || { echo 'routine style edit은 옵션을 받지 않습니다.' >&2; return 2; }

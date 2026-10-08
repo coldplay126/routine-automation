@@ -18,6 +18,7 @@ routine_load_config() {
     if [[ ${!env+x} ]]; then
       value=${!env}
       case $key in
+        draft.project) key=draft.projects; value=$(command jq -L "$share_dir" -nc --arg v "$value" 'include "config"; $v|legacy_draft_projects') || return 2 ;;
         identity.git_authors) value=$(command jq -nc --arg v "$value" '$v|split(" ")|map(select(length>0))') ;;
         sources.git.roots)
           if [[ $env == ROUTINE_REPO_ROOT ]]; then value=$(command jq -nc --arg v "$value" '[$v]')
@@ -78,7 +79,7 @@ ROUTINE_AWS_SESSION morning.extra_steps.aws_session
 ROUTINE_LABEL_PREFIX launchd.label_prefix
 MAP
   if [[ -n ${ROUTINE_CLI_OVERRIDES:-} ]]; then
-    ROUTINE_SETTINGS=$(command jq -c --argjson overrides "$ROUTINE_CLI_OVERRIDES" '. as $known | reduce $overrides[] as $o (.;if ($known|[paths|join(".")]|index($o.key))==null then error("알 수 없는 CLI 설정: "+$o.key) else setpath($o.key|split(".");$o.value) end)' <<< "$ROUTINE_SETTINGS") || return 2
+    ROUTINE_SETTINGS=$(command jq -L "$share_dir" -c --argjson overrides "$ROUTINE_CLI_OVERRIDES" 'include "config"; . as $known | reduce $overrides[] as $raw (.; ($raw|if .key=="draft.project" then {key:"draft.projects",value:(.value|legacy_draft_projects)} else . end) as $o | if ($known|[paths|join(".")]|index($o.key))==null then error("알 수 없는 CLI 설정: "+$o.key) else setpath($o.key|split(".");$o.value) end)' <<< "$ROUTINE_SETTINGS") || return 2
   fi
   routine_validate_loaded
 }
@@ -95,7 +96,11 @@ routine_jq_supported() {
   [[ $version =~ ^jq-([0-9]+)\.([0-9]+) ]] || return 1
   ((BASH_REMATCH[1]>1 || (BASH_REMATCH[1]==1 && BASH_REMATCH[2]>=7)))
 }
-routine_get() { command jq -r --arg key "$1" 'getpath($key|split(".")) | select(.!=null)' <<< "$ROUTINE_SETTINGS"; }
+routine_get() {
+  command jq -r --arg key "$1" 'if $key=="draft.project" then
+    .draft.projects | if length==0 then "" elif length==1 then .[0].label else error("여러 프로젝트는 draft.projects로 조회하세요") end
+    else getpath($key|split(".")) | select(.!=null) end' <<< "$ROUTINE_SETTINGS"
+}
 routine_require_config() {
   local missing guide=${1:-routine init}
   missing=$(command jq -L "$share_dir" -r 'include "config"; required_errors|join(", ")' <<< "$ROUTINE_SETTINGS") || return 2

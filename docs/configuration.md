@@ -75,7 +75,7 @@ setup의 영구 LaunchAgent/복사 앱은 **저장된 설정**으로만 만듭�
 | `slack.channel_name` | string, `""` | gui-paste 필수. 한국어 UI 스레드 라벨의 채널 이름 |
 | `slack.post_title` | string, `""` | gui-paste 필수. 오늘 스크럼 글을 식별할 고유 제목 |
 | `slack.post_time_prefix` | string, `오전 8:0` | `오전/오후 1–12시:분` 접두어. 분 첫 숫자 0–5, 둘째 숫자 0–9는 선택. 넓은 `오전 1`은 거부 |
-| `draft.project` | string, `""` | 선택. 비어 있으면 분류가 최상위 글머리 |
+| `draft.projects` | object[], `[]` | 순서가 최상위 프로젝트 순서. 각 항목은 고유한 비공백 `label`, 선택 `owners`·`keywords` 문자열 배열. 빈 배열이면 분류가 최상위 |
 | `draft.markers` | `none\|uncertain\|all`, none | 표시 접미사만 조절. 근거 수준·질문 검증은 동일 |
 | `draft.headers.yesterday` / `.today` | string, `어제 작업한 내용` / `오늘의 작업 계획` | HTML·텍스트 제목 |
 | `draft.categories` | string[], 현황 파악·배포·개발·인프라·업무 자동화·기타 | 분류 순서·프롬프트 |
@@ -109,8 +109,48 @@ setup의 영구 LaunchAgent/복사 앱은 **저장된 설정**으로만 만듭�
 | `morning.extra_steps.claude_update` | bool, false | `claude update` |
 | `morning.extra_steps.npm_update` | bool, false | `npm update -g` |
 | `morning.extra_steps.aws_session` | bool, false | `aws-session-check`, 항상 마지막 |
+| `morning.extra_steps.jira_propose` | bool, false | `jira.enabled`일 때 읽기 전용 Jira 제안 생성. AWS 직전. 최초 setup 후 실행에서는 건너뜀 |
 | `launchd.label_prefix` | string, `com.<$USER>.routine` | `.morning`/`.scrum-paste` 라벨 앞부분 |
 | `timezone` | string/null, null=시스템 | 수집·초안·예약 표시 시간대 |
+
+### Jira 동기화
+
+`sources.jira.enabled`는 기존 Chrome 방문 기록 소스이고, 아래 `jira.enabled`와 별개입니다.
+Jira 설정 오류는 `routine jira`·제안 생성에만 적용하며 기존 스크럼 초안을 막지 않습니다.
+
+| 키 | 타입·기본값 | 설명 |
+|---|---|---|
+| `jira.enabled` | bool, false | API 동기화 사용 |
+| `jira.site` / `.email` | string, `""` | `https://example.atlassian.net` 형식의 사이트 / Keychain account 이메일 |
+| `jira.evidence_days` | 정수 1–30, 7 | 연결 판단 근거 기간 |
+| `jira.candidate_days` | 정수 1–90, 30 | 내 미완료 이슈 연결 후보 검색 기간. 중복 검색에는 적용하지 않음 |
+| `jira.duplicate_max_pages` | 정수 1–100, 20 | 중복 검색 쿼리당 페이지 상한. 끝까지 못 읽으면 생성 금지 |
+| `jira.repos` | object, `{}` | 저장소 이름 → 프로젝트·제목 머리말. `prefix:""`는 머리말 없음이며 제목 앞에 공백을 붙이지 않음. 공백만 있는 머리말은 거부 |
+| `jira.projects` | object, `{}` | 프로젝트별 초기 상태·진행 중 상태·생성 유형 ID |
+| `jira.templates` | object, 작업/버그 양식 | 유형 이름 match, 머리글·스타일·완료 조건/링크 머리글 |
+| `jira.stopwords` | string[], `[]` | 연결·검색에서 뺄 흔한 단어 추가 |
+| `jira.key_like_ignore` | string[], `["CVE","RFC","GPT","ISO","SHA","UTF","TLS","HTTP"]` | 이슈 키처럼 보이는 문자열의 예외 접두어 |
+
+검색의 저장소/접두어 제외는 현재 작업에만 적용합니다. 다른 저장소의 이름·접두어에 쓰인 업무 단어를 전역에서 지우지 않습니다. 모델 제목 앞의 설정 머리말/현재 저장소 토큰만 제거한 뒤 `jira.repos.<repo>.prefix`를 한 번만 붙이며 `[긴급]`·`[AOS]` 등 의미 있는 태그는 보존합니다. 미매핑 안내에는 해당 `jira.repos.<repo>.project` 설정과 작업 ID 예시를 표시합니다.
+
+```bash
+routine config set jira.site '"https://example.atlassian.net"'
+routine config set jira.email '"fixture@example.com"'
+routine config set jira.projects '{"ABC":{"statuses":{"start_from":["1"],"in_progress":"3"},"create_type":"10"}}'
+routine config set jira.repos '{"example":{"project":"ABC","prefix":"[BACK]"}}'
+routine config set jira.enabled true
+routine config set morning.extra_steps.jira_propose true
+```
+
+상태 ID와 전환 ID는 다릅니다. 위 숫자는 가상 예시이므로 프로젝트의 실제 **상태 ID**와 유형 ID를 확인해 바꾸세요.
+`start_from`에는 초기 상태 하나만 넣는 것을 권합니다. 보류 상태를 추가하면 자동 재개 제안의 대상이 됩니다.
+객체 키는 `jira.projects`·`jira.repos`를 JSON 전체로 저장합니다. 새 환경 변수는 없습니다.
+`prefix`는 문자열이어야 합니다. 머리말이 필요 없는 저장소는 `{"project":"ABC","prefix":""}`로 지정하세요.
+새 이슈 담당자는 인증한 본인입니다. 타인 담당·미배정 이슈에는 댓글만 제안합니다.
+작업 양식은 `확인사항/작업 내용/완료 조건/관련 링크`(strong),
+버그 양식은 `[사전조건]/[재현경로]/[기대결과]/[실제결과]/관련 제보 링크`(plain)입니다.
+버그에는 완료 조건 칸이 없고 관련 제보 링크 칸을 자동으로 채우지 않습니다.
+
 
 ### 환경 변수
 
@@ -161,7 +201,7 @@ routine config set sources.git.roots '["/Users/example/dev","/Users/example/work
 해외 팀 등은 `routine config set calendar.public_holidays '"none"'`으로 끌 수 있습니다.
 임시공휴일·회사 휴무일은 `calendar.days_off`에 추가하세요.
 
-비근무일에는 morning의 collect·draft·paste만 건너뛰고 사유를 알립니다. 도구 업데이트·AWS 등 `extra_steps`는 설정대로 실행합니다.
+비근무일에는 morning의 collect·draft·paste만 건너뛰고 사유를 알립니다. 도구 업데이트·Jira 제안·AWS 등 `extra_steps`는 설정대로 실행합니다. Jira 제안은 `jira.enabled=false`이면 항상 건너뜁니다.
 자동 붙여넣기도 비근무일이면 GUI·클립보드 접근 전에 즉시 건너뜁니다. 수동 collect·draft는 막지 않습니다.
 status는 다음 실제 예약 근무일과 앞으로 건너뛸 가장 가까운 예약일을 표시합니다.
 주말 등 예약 요일 밖의 예외 근무일은 launchd 예약을 새로 만들지 않으므로 그날 `routine run`을 실행하세요.
@@ -181,7 +221,17 @@ status는 다음 실제 예약 근무일과 앞으로 건너뛸 가장 가까운
 
 ## 프로젝트·표지
 
-프로젝트가 비어 있으면 현황 파악·배포·개발 등의 분류가 text와 HTML의 최상위 글머리가 됩니다. 필요하면 `--project` 또는 `draft.project`로 한 단계 위 묶음을 넣을 수 있습니다.
+`draft.projects`가 비어 있으면 현황 파악·배포·개발 등의 분류가 text·HTML·Slack의 최상위 글머리가 됩니다. 여러 프로젝트는 설정 순서대로 어제/오늘 각각의 최상위 묶음이 되며, 항목이 없는 프로젝트는 출력하지 않습니다. 프로젝트 아래의 분류·주제·작업 계층은 기존과 같습니다. `flat`은 각 프로젝트 안에서 분류만 생략합니다.
+
+```sh
+routine config set draft.projects '[{"label":"예제 A","owners":["alpha-org"],"keywords":["alpha","알파"]},{"label":"예제 B","owners":["beta-org"],"keywords":["beta","베타"]}]'
+```
+
+판정은 ① 연결된 유효 Git/PR 저장소 owner가 가리키는 단일 프로젝트 ② 항목의 **path 모든 요소·topic·연결 근거 텍스트**에 설정 keywords가 가리키는 단일 프로젝트 ③ 목록에서 검증된 LLM `project` ④ 첫 프로젝트 순서입니다. owner는 대소문자를 무시하고 정확히 비교하며, keywords는 대소문자를 무시한 부분 문자열입니다. 둘 이상의 프로젝트 키워드가 잡히면 모호한 것으로 보고 LLM 값 또는 첫 프로젝트를 사용하고 확인 질문을 남깁니다. 저장소 판정과 단일 키워드 판정이 충돌하거나 결정적 판정과 유효한 LLM 값이 다르면 owner > keywords 판정을 유지하며 `<topic>: 프로젝트 판정 충돌(<a> vs <b>)`을 남깁니다. 여러 프로젝트의 저장소가 연결된 항목도 모호함을 질문에 남깁니다. 목록 밖·잘못된 형식의 LLM `project`만 무시하고 확인 질문을 남기며, 초안 전체를 거부하지 않습니다. Claude 출력 스키마도 설정 라벨과 null로 제한합니다. 프로젝트 질문은 검토 화면의 이유와 **확인 필요** 표지에도 나타납니다. 설정 프로젝트 객체에는 `label`, `owners`, `keywords`만 허용하므로 `owner`·`keyword` 오타는 저장하지 않습니다.
+
+검토 이유는 항목에 저장된 `reasons`를 우선합니다. 어제·오늘이나 제외된 항목의 topic이 같아도 다른 항목의 질문을 섞어 붙이지 않습니다. 이전 저장본에 프로젝트 질문만 있고 항목별 이유가 없다면 **수집·초안 안내**에서 질문을 보여 주며 특정 항목에 재배정하지 않습니다.
+
+기존 설정 파일의 `draft.project` 문자열은 단일 `{label,owners:[],keywords:[]}` 배열로 읽고, 이후 설정 저장에는 `draft.projects`만 기록합니다. `""`는 빈 배열입니다. 기존 `--project`·`--draft-project`·`ROUTINE_PROJECT`·`--set draft.project`·`config set draft.project` 입력도 단일 프로젝트 지정으로 처리합니다. 단일 프로젝트일 때 `config get draft.project`는 기존 라벨을 반환하지만, 여러 프로젝트는 `config get draft.projects`로 조회해야 합니다. 새 초기화 배열 플래그는 `--draft-projects JSON`입니다. 검토 화면과 형식 미리보기는 초안에 저장된 프로젝트 설정을 사용하므로 이후 설정 변경으로 분류를 바꾸지 않습니다.
 
 표지 기본값은 none입니다.
 `none`은 수준/확인 필요 접미사를 숨기고, `uncertain`은 `(확인 필요)`만,

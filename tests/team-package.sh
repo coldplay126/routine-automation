@@ -269,7 +269,7 @@ cp "$sandbox/broken-orca/orca" "$sandbox/stubs/orca"
 PATH="$sandbox/broken-orca:$PATH" /usr/bin/expect "$repo/tests/fixtures/setup-pty.exp" "$routine" "$sandbox/tty-command" "$sandbox/tty-success" valid > /dev/null || true
 mv "$sandbox/orca-good" "$sandbox/stubs/orca"
 if ! grep -q 'SETUP_RC=0' "$sandbox/tty-success" || ! grep -q '설정 완료' "$sandbox/tty-success"; then cat "$sandbox/tty-success" >&2; fail 'Interactive setup failed (bash 3.2 empty array or broken orca on PATH)'; fi
-jq -e '.draft.project=="" and .slack.workspace_domain=="example" and .slack.channel_id=="CEXAMPLE" and .slack.team_id=="TEXAMPLE" and .identity.slack_display_name=="" and .slack.channel_name=="" and .slack.post_title=="" and (.sources.omp_sessions.enabled|not) and (.sources.claude_sessions.enabled|not)' "$ROUTINE_CONFIG" >/dev/null || fail 'Clipboard interactive setup did not keep only needed identity values'
+jq -e '.draft.projects==[] and .slack.workspace_domain=="example" and .slack.channel_id=="CEXAMPLE" and .slack.team_id=="TEXAMPLE" and .identity.slack_display_name=="" and .slack.channel_name=="" and .slack.post_title=="" and (.sources.omp_sessions.enabled|not) and (.sources.claude_sessions.enabled|not)' "$ROUTINE_CONFIG" >/dev/null || fail 'Clipboard interactive setup did not keep only needed identity values'
 jq -Rse 'contains("설정 1/4 · Slack 글 링크") and contains("설정 4/4 · 확인")' "$sandbox/tty-success" >/dev/null || fail 'Text onboarding stage total failed'
 # The app-bundle fallback may only be probed (--help); it must never read Slack state.
 ! grep -qv '^--help$' "$sandbox/orca-app-calls" 2>/dev/null || fail 'Init used the Orca app bundle beyond the --help probe'
@@ -281,7 +281,7 @@ jq -L "$repo/tests" -e 'include "setup-screen"; setup_once and any(setup_rows[];
 cp "$sandbox/config-before-tty" "$ROUTINE_CONFIG"
 # --overwrite-config with init flags keeps the remaining interactive link/source prompts.
 /usr/bin/expect "$repo/tests/fixtures/setup-pty.exp" "$routine" "$sandbox/tty-command" "$sandbox/tty-overwrite" overwrite > /dev/null || fail 'Overwrite setup with flags skipped interactive prompts'
-jq -e '.draft.project=="예제 프로젝트" and .delivery.mode=="clipboard" and .sources.prs.enabled' "$ROUTINE_CONFIG" >/dev/null || fail 'Overwrite lost the explicit PR selection or changed an unprompted project/delivery choice'
+jq -e '.draft.projects[0].label=="예제 프로젝트" and (.draft|has("project")|not) and .delivery.mode=="clipboard" and .sources.prs.enabled' "$ROUTINE_CONFIG" >/dev/null || fail 'Overwrite lost the explicit PR selection or changed an unprompted project/delivery choice'
 jq -Rsf "$repo/tests/terminal-screen.jq" "$sandbox/tty-overwrite" > "$sandbox/final-screen.json"
 jq -L "$repo/tests" -e 'include "setup-screen"; setup_once' "$sandbox/final-screen.json" >/dev/null || fail 'Scrolled terminal retained multiple checklists'
 # Only the closest directly enclosing message container can supply the prefix.
@@ -331,7 +331,7 @@ for mode in gui-ready gui-grant gui-window gui-skip clipboard-choice gui-delayed
     if [[ $mode == gui-missing ]]; then [[ $(cat "$RECORD.init-probes") == 5 ]] || fail 'Init snapshot polling did not stop at five attempts'
     else ! grep -q '^open -g slack://' "$RECORD" || fail 'Non-terminal foreground navigated Slack'; fi
   elif [[ $mode == gui-* && $mode != gui-skip ]]; then
-    jq -e '.delivery.mode=="gui-paste" and .slack.channel_name=="daily-scrum" and .identity.slack_display_name=="감지 사용자" and .slack.post_title=="감지 스크럼" and .draft.project==""' "$ROUTINE_CONFIG" >/dev/null || fail 'Linked channel identity/title detection failed'
+    jq -e '.delivery.mode=="gui-paste" and .slack.channel_name=="daily-scrum" and .identity.slack_display_name=="감지 사용자" and .slack.post_title=="감지 스크럼" and .draft.projects==[]' "$ROUTINE_CONFIG" >/dev/null || fail 'Linked channel identity/title detection failed'
     if [[ $mode == gui-ready ]]; then
       jq -Rse 'contains("설정 2/5 · Slack 정보") and contains("설정 5/5 · 확인")' "$sandbox/tty-$mode" >/dev/null || fail 'Text GUI stage total is wrong'
     fi

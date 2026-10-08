@@ -33,7 +33,7 @@ finish() {
 trap finish EXIT
 routine_load_config
 usage() { echo 'Usage: morning [--dry-run] [--skip STEP]... [--only STEP]...'; }
-steps=(omp-update claude-update npm-update scrum-collect scrum-draft scrum-paste aws-session)
+steps=(omp-update claude-update npm-update scrum-collect scrum-draft scrum-paste jira-propose aws-session)
 skip=(__none__) only=(__none__) dry_run=0
 valid_step() {
   local step
@@ -58,18 +58,19 @@ contains() {
   for item in "${@:2}"; do [[ $item == "$1" ]] && return 0; done
   return 1
 }
-for extra in omp_update claude_update npm_update aws_session; do
+for extra in omp_update claude_update npm_update jira_propose aws_session; do
   [[ $(routine_get "morning.extra_steps.$extra") == true ]] || skip+=("${extra//_/-}")
 done
+[[ $(routine_get jira.enabled) == true ]] || skip+=(jira-propose)
 if [[ -f $setup_marker ]]; then
-  skip+=(omp-update claude-update npm-update aws-session scrum-paste)
+  skip+=(omp-update claude-update npm-update aws-session scrum-paste jira-propose)
 fi
 day=$(routine_day)
 nonwork_reason=$(routine_workday_reason "$day")
 calendar_warning=$(routine_calendar_warning "$day")
 if [[ -n $nonwork_reason ]]; then skip+=(scrum-collect scrum-draft scrum-paste); fi
 log_dir="$HOME/Library/Logs/routine-automation"
-commands=('omp update' 'claude update' 'npm update -g' "$script_dir/scrum-collect" "$script_dir/scrum-draft" "$script_dir/scrum-paste --auto" 'aws-session-check')
+commands=('omp update' 'claude update' 'npm update -g' "$script_dir/scrum-collect" "$script_dir/scrum-draft" "$script_dir/scrum-paste --auto" "$script_dir/jira-propose" 'aws-session-check')
 if ((dry_run)); then
   for index in "${!steps[@]}"; do
     step=${steps[index]}
@@ -132,7 +133,9 @@ else
   echo 'morning: gtimeout or timeout required' | tee -a "$log" >&2
   exit 1
 fi
-failures=() summary=() failures_count=0
+failures=() summary=() failures_count=0 paste_status='' paste_notice=''
+paste_out="$HOME/Library/Application Support/routine-automation/scrum/$day"
+paste_window_end=$(routine_get delivery.window.end); paste_window_end=${paste_window_end/:/}
 for index in "${!steps[@]}"; do
   step=${steps[index]}
   if { [[ ${only[1]-} ]] && ! contains "$step" "${only[@]}"; } || contains "$step" "${skip[@]}"; then
@@ -155,13 +158,30 @@ for index in "${!steps[@]}"; do
     scrum-collect) args=(env ROUTINE_COLLECT_PROGRESS=1 "$script_dir/scrum-collect") ;;
     scrum-draft) args=(env -u ROUTINE_ALLOW_GUI "$script_dir/scrum-draft") ;;
     scrum-paste) args=(env ROUTINE_MORNING_LOCK_PID="$$" "$script_dir/scrum-paste" --auto) ;;
+    jira-propose) args=(env -u ROUTINE_ALLOW_GUI "$script_dir/jira-propose") ;;
   esac
   printf '%s START %s\n' "$(date '+%FT%T%z')" "$step" >> "$log"
   if (umask "$original_umask"; exec "$timeout_cmd" -k 30 600 "${args[@]}" </dev/null >> "$log" 2>&1); then status=ok; code=0
   else
     code=$?
-    if [[ $step == scrum-paste && ( $code == 3 || $code == 4 ) ]]; then status=ok
+    if [[ $step == scrum-paste && ( $code == 3 || $code == 4 ) ]]; then status=대기
     else status=fail; failures+=("$step"); ((failures_count+=1)); fi
+  fi
+  if [[ $step == scrum-paste ]]; then
+    paste_clock=$(date '+%H%M')
+    if [[ -n ${ROUTINE_NOW:-} ]]; then
+      paste_stamp=${ROUTINE_NOW/Z/+0000}
+      paste_stamp=$(printf '%s' "$paste_stamp" | sed -E 's/([+-][0-9]{2}):([0-9]{2})$/\1\2/')
+      paste_clock=$(date -j -f '%Y-%m-%dT%H:%M:%S%z' "$paste_stamp" '+%H%M')
+    fi
+    if [[ -e $paste_out.paste-attention ]]; then status='확인 필요'; paste_notice='스크럼 붙여넣기 상태 확인 필요(붙여넣었을 수 있음), 전송 금지'
+    elif [[ -e $paste_out.pasted ]]; then [[ $status == fail ]] || status=ok; paste_notice='스크럼 초안을 스레드 입력창에 준비했습니다. 확인 후 직접 전송'
+    elif [[ -e $paste_out.paste-skipped || $code == 3 ]]; then status=종결; paste_notice='스크럼 자동 붙여넣기 종결, 알림/로그 확인'
+    elif [[ -e "$HOME/Library/Application Support/routine-automation/autopaste.disabled" ]] || ((10#$paste_clock > 10#$paste_window_end)); then
+      status='재시도 없음'; paste_notice='스크럼 자동 붙여넣기 재시도 없음(비활성 또는 시간 창 종료) — 필요하면 routine paste'
+    elif [[ $code == 0 || $code == 4 ]]; then status=대기; paste_notice='스크럼 붙여넣기 대기 — 붙여넣지 않음, 전송은 직접 확인'
+    fi
+    paste_status=$status
   fi
   if [[ $step == scrum-paste ]]; then printf 'paste-done\n' > "$lock/stage"; fi
   elapsed=$(($(date +%s) - start))
@@ -175,6 +195,9 @@ if ((failures_count)); then
   notice="실패: ${failures[*]}"
 else
   notice='모든 단계 완료'
+fi
+if [[ -n $paste_status && $paste_status != ok && $paste_status != fail ]]; then
+  ((failures_count)) || notice='단계 실행 종료'
 fi
 if [[ -n $nonwork_reason ]]; then
   summary_reason="스크럼:skipped($nonwork_reason)"
@@ -190,6 +213,8 @@ if contains 'scrum-draft:ok' "${summary[@]%%(*}"; then
   paste_out="$HOME/Library/Application Support/routine-automation/scrum/$paste_day"
   if [[ $(routine_get delivery.mode) == clipboard ]]; then
     notice+=' — 초안 준비 — 검토: routine review'
+  elif [[ -n $paste_notice ]]; then
+    notice+=" — $paste_notice"
   elif [[ -e $paste_out.paste-attention ]]; then
     notice+=' — 스크럼 붙여넣기 상태 확인 필요, 전송 금지'
   elif [[ -e $paste_out.pasted ]]; then
@@ -200,6 +225,11 @@ if contains 'scrum-draft:ok' "${summary[@]%%(*}"; then
     notice+=' — 스크럼 초안 준비됨 — 자동 scrum-paste 대기, 전송은 직접 확인'
   fi
   notice+="$(routine_draft_omission_notice "$paste_out.draft.json")"
+fi
+jira_proposals="$HOME/Library/Application Support/routine-automation/jira/$day.proposals.json"
+if [[ $(routine_get jira.enabled) == true && -f $jira_proposals ]]; then
+  jira_count=$(command jq '.proposals|length' "$jira_proposals" 2>/dev/null) || jira_count=0
+  if ((jira_count>0)); then notice+=" — Jira 제안 ${jira_count}건 — 검토: routine jira review"; fi
 fi
 # shellcheck source=../share/update.sh
 source "$share_dir/update.sh"

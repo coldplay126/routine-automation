@@ -95,7 +95,7 @@ jq -e '
   any(.items[];.section=="today" and .held and .disabled and .selected==false and (.reasons|index("보류 중인 오늘 계획은 초안에 포함하지 않습니다.")!=null)) and
   any(.items[].proof[];.id=="note:0" and .text=="오늘 메모 작업") and
   all(.items[];(.topic|startswith("이전 버전 PR 근거")|not)) and
-  .settings.project=="예제 프로젝트" and .settings.headers.today=="오늘의 작업 계획" and
+  .settings.projects[0].label=="예제 프로젝트" and (.settings|has("project")|not) and .settings.headers.today=="오늘의 작업 계획" and
   any(.items[].proof[];.id=="session:report" and (.text|length)==300 and (.text|contains("[REDACTED]"))) and
   any(.items[].proof[];.id=="git:abc123") and
   any(.items[].proof[];.id=="pr:https://example.test/pull/1") and
@@ -103,6 +103,22 @@ jq -e '
   all(.items[].proof[];(.text|length)<=300) and
   .channel=="slack://channel?team=TEXAMPLE&id=CEXAMPLE"
 ' "$sandbox/data.json" > /dev/null || fail '근거·보류·제외 후보·redact·300자 경계'
+(
+  export MODEL_JSON="$sandbox/same-topic-model.json"
+  jq -n '{git:[{sha:"same-topic",repo:"service",subject:"API 정리"}],prs:[],sessions:[],slack:[],errors:[]}' > "$out/2026-09-24.json"
+  jq -n '{items:[
+    {section:"yesterday",path:["개발","서비스"],topic:"API 정리",level:"work",evidence:["git:missing"]},
+    {section:"today",path:["개발","서비스"],topic:"API 정리",level:"work",evidence:["git:same-topic"]}
+  ]}' > "$MODEL_JSON"
+  "$routine" draft --date 2026-09-24 --engine omp > /dev/null
+  same_topic_html=$("$routine" review --date 2026-09-24 --no-open)
+  jq -Rse '
+    capture("<script id=\"review-data\" type=\"application/json\">(?<data>[^\\n]+)</script>").data|fromjson|
+    any(.items[];.topic=="API 정리" and .section=="today" and .selected and .reasons==[]) and
+    any(.items[];.topic=="API 정리" and .section=="yesterday" and .question_only and (.selected|not) and any(.reasons[];contains("git:missing")))
+  ' "$same_topic_html" > /dev/null || fail '같은 topic의 어제 제외 이유가 오늘 유효 항목으로 이동'
+  jq -Rse 'capture("<article class=\"card\" data-item=\"0\">(?<card>[\\s\\S]*?)</article>").card|contains("<span class=\"badge attention\">확인 필요</span>")|not' "$same_topic_html" > /dev/null || fail '같은 topic 교차 이유가 실제 HTML의 오늘 항목에 확인 필요 표지 생성'
+)
 cp "$out/2026-09-28.draft.json" "$sandbox/snapshot.json"
 cp "$ROUTINE_CONFIG" "$sandbox/legacy-config.json"
 jq --slurpfile snapshot "$sandbox/snapshot.json" '.draft=$snapshot[0].settings' "$sandbox/legacy-config.json" > "$ROUTINE_CONFIG"

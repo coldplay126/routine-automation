@@ -15,8 +15,11 @@ def review_data($source;$day):
   {day:$day,settings:($draft.settings // (draft_settings|.format=default_format)),
    channel:("slack://channel?team="+($ARGS.named.routine.slack.team_id // ""|@uri)+"&id="+($ARGS.named.routine.slack.channel_id // ""|@uri)),
    yesterday:$draft.yesterday,today:$draft.today,
-   notices:(if $draft|has("excluded_items") then
-     [$questions[]|. as $q|select(any($known[];. as $item|$q|review_question($item.topic))|not)] else [] end),
+   notices:[$questions[]|. as $q|select(
+     (($draft|has("excluded_items")) and (any($known[];. as $item|$q|review_question($item.topic))|not)) or
+     (($q|test("^.+: 프로젝트 (판정 (충돌|모호)\\(|라벨 확인 필요\\()")) and
+      any($known[];. as $item|$q|review_question($item.topic)) and
+      (any($known[];. as $item|any(.reasons[]?;.==$q or ($item.topic+": "+.)==$q))|not)))],
    items:(([$draft.items[] | .+{selected:(.omitted!=true and (.section!="today" or .held!=true)),question_only:(.omitted==true)}] +
      [($draft.excluded_items // [])[] | .+{selected:false,question_only:true}] + [$legacy[] | .+{selected:false}]) |
      map(. as $item | (.section=="today" and .held==true) as $disabled |

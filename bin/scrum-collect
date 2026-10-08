@@ -147,7 +147,7 @@ collect_git() {
   local root authors_raw marker common seen='[]' until_git scan_message
   authors_raw=$(routine_get identity.git_authors)
   [[ $authors_raw != '[]' ]] || { source_error='Git author identities are missing (routine init)'; return 1; }
-  local repo author lines sha ts author_ts author_epoch subject origin name rebased repo_ok
+  local repo author lines sha ts author_ts author_epoch subject origin name owner rebased repo_ok
   local valid_repos=0 repo_errors=0
   local -a authors
   authors=()
@@ -168,6 +168,7 @@ collect_git() {
       [[ -d $repo && ( -d $repo/.git || -f $repo/.git ) ]] || continue
       name=${repo##*/}
       origin=$(git -C "$repo" config --get remote.origin.url 2>/dev/null || true)
+      owner=$(printf '%s' "$origin" | command jq -L "$share_dir" -Rrs 'include "scrum"; repository_owner') || return 1
       if [[ -n $origin ]]; then
         name=${origin##*/}; name=${name##*:}; name=${name%.git}
       fi
@@ -186,7 +187,7 @@ collect_git() {
         while IFS=$'\t' read -r sha ts author_ts author_epoch subject; do
           rebased=false
           if ((author_epoch < since_epoch || author_epoch >= until_epoch)); then rebased=true; fi
-          jq -nc --arg repo "$name" --arg sha "$sha" --arg ts "$ts" --arg author_ts "$author_ts" --arg subject "$subject" --argjson rebased "$rebased" '{repo:$repo,sha:$sha,ts:$ts,author_ts:$author_ts,rebased:$rebased,subject:$subject}' >> "$work/repo.rows" || return 1
+          jq -nc --arg repo "$name" --arg owner "$owner" --arg sha "$sha" --arg ts "$ts" --arg author_ts "$author_ts" --arg subject "$subject" --argjson rebased "$rebased" '{repo:$repo,owner:$owner,sha:$sha,ts:$ts,author_ts:$author_ts,rebased:$rebased,subject:$subject}' >> "$work/repo.rows" || return 1
         done <<< "$lines"
       done
       if ((repo_ok)); then
@@ -243,7 +244,7 @@ collect_prs() {
       add_error prs "PR collection deadline exceeded: $url"
     elif pr_call 20 gh pr view "$url" --json state,baseRefName,title,author,createdAt,mergedAt,mergedBy,commits,reviews,comments > "$work/pr.current" 2>/dev/null &&
          jq -es 'length==1 and (.[0]|type=="object" and (.state|IN("OPEN","CLOSED","MERGED")))' "$work/pr.current" >/dev/null; then
-      if jq -c --slurpfile current "$work/pr.current" '. + {current:($current[0]|{state,baseRefName,title,mergedAt})}' "$work/pr.candidate" > "$work/pr.annotated" &&
+      if jq -c --slurpfile current "$work/pr.current" '. + {current:($current[0]|{state,baseRefName,title,mergedAt}),commit_oids:[$current[0].commits[]?.oid|select(type=="string")],commits_complete:($current[0].commits|type=="array" and length<100)}' "$work/pr.candidate" > "$work/pr.annotated" &&
          [[ -n $login ]] &&
          jq -L "$share_dir" -c --arg login "$login" --arg since "$since" --arg until "$until" 'include "scrum"; pr_activity($login;$since;$until)' "$work/pr.current" > "$work/pr.activity" 2>/dev/null &&
          jq -c --slurpfile activity "$work/pr.activity" '. + {activity:$activity[0],in_window:any($activity[0][];.kind!="merged_by_other")}' "$work/pr.annotated" > "$work/pr.row"; then
@@ -446,7 +447,7 @@ jq -n --arg since "$since" --arg until "$until" --arg tz "$TZ" --arg generated_a
   '{version:1,window:{since:$since,until:$until,tz:$tz,limited:$window_info.limited,max_days:$window_info.max_days,notices:$window_info.notices},generated_at:$generated_at,sources:{slack:$slack_success},git:$git[0],prs:$prs[0],sessions:($sessions[0]+$claude[0]),jira:$jira[0],notion:$notion[0],slack:$slack[0],errors:$errors[0]}' > "$work/result.raw.json"
 jq -L "$work" '
   include "redact";
-  .git |= map(.repo |= redact | .subject |= redact) |
+  .git |= map(.repo |= redact | .owner |= redact | .subject |= redact) |
   .prs |= map(walk(if type=="string" then redact else . end) | .url |= redact_url) |
   .sessions |= map(.title |= redact | .cwd |= redact | .user_messages |= map(.text |= redact)) |
   .jira |= map(.title |= redact | .url |= redact_url) |

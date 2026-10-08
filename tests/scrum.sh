@@ -69,7 +69,7 @@ echo com.tinyspeck.slackmacgap > "$FOREGROUND"
 if [[ ${AUTO_SELF_RESET:-0} == 1 ]]; then perl -MTime::HiRes=time -e 'printf "%.0f\n", time*1000' > "$HID_RESET_EPOCH"; fi
 [[ ${PASTE_MODE:-} != signal-open ]] || kill -TERM "$PPID"
 if [[ ${1-} == -a ]]; then echo search > "$STAGE"; else echo channel > "$STAGE"; fi
-rm -f -- "$STAGE.polls" "$STAGE.pasted"
+rm -f -- "$STAGE.polls" "$STAGE.pasted" "$STAGE.reply.polls"
 if [[ ${1-} == -a ]]; then rm -f -- "$STAGE".*.polls "$STAGE.cleared"; fi
 OPEN
 cat > "$HOME/.local/bin/sleep" <<'SLEEP'
@@ -216,7 +216,24 @@ case $2 in
         else
           tree="[30] container, Text: 스크럼-예제팀: 예제팀"$'\n'"[32] link [$day, 오전 8:00:01](https://example.slack.com/archives/CEXAMPLE/p1790895609247049)"
           if [[ ${PASTE_MODE:-} == search-root-changed && -f $STAGE.searched ]]; then tree=${tree//p1790895609247049/p1790895608539999}; fi
-          if [[ ${PASTE_MODE:-} == zero || ${PASTE_MODE:-} == reply-label || ${PASTE_MODE:-} == no-reply ]]; then
+          if [[ ${PASTE_MODE:-} == toolbar-* ]]; then
+            reveal_polls=0
+            if [[ $stage == reveal ]]; then
+              reveal_polls=$(cat "$STAGE.reply.polls" 2>/dev/null || echo 0)
+              reveal_polls=$((reveal_polls+1)); echo "$reveal_polls" > "$STAGE.reply.polls"
+            fi
+            case ${PASTE_MODE:-} in
+              toolbar-direct|toolbar-thread-copy|toolbar-split|toolbar-private|toolbar-private-prefix|toolbar-index-drift)
+                if [[ ${PASTE_MODE:-} == toolbar-index-drift ]]; then
+                  polls=$(cat "$STAGE.channel.polls" 2>/dev/null || echo 0); polls=$((polls+1)); echo "$polls" > "$STAGE.channel.polls"
+                fi
+                if [[ ${PASTE_MODE:-} != toolbar-index-drift || $polls -lt 2 ]]; then tree+=$'\n[33] 버튼 스레드의 댓글'; fi ;;
+              toolbar-delayed) [[ $reveal_polls -lt 2 ]] || tree+=$'\n[33] 버튼 스레드에 댓글 달기' ;;
+              toolbar-ambiguous) [[ $stage != reveal ]] || tree+=$'\n[33] 버튼 스레드의 댓글\n[62] 버튼 스레드에 댓글 달기' ;;
+              toolbar-initial-ambiguous) tree+=$'\n[33] 버튼 스레드의 댓글\n[62] 버튼 스레드에 댓글 달기' ;;
+            esac
+            tree+=$'\n[38] container, Text: token=toolbar-secret 비밀본문 테스트_사용자'
+          elif [[ ${PASTE_MODE:-} == zero || ${PASTE_MODE:-} == reply-label || ${PASTE_MODE:-} == no-reply ]]; then
             if [[ $stage == reveal ]]; then
               [[ ${PASTE_MODE:-} != zero ]] || tree+=$'\n[33] 버튼 스레드에서 답장'
               [[ ${PASTE_MODE:-} != reply-label ]] || tree+=$'\n[33] 버튼 스레드에 댓글 달기'
@@ -227,7 +244,17 @@ case $2 in
           if [[ -f $STAGE.searched ]]; then tree=${tree/$'\n[31]'/$'\n[61]'}; fi
           if [[ ${PASTE_MODE:-} == multi ]]; then tree+=$'\n[50] container, Text: 스크럼-예제팀: 예제팀\n[51] link [오늘, 오전 8:02:01](https://slack.example/other)\n[52] 버튼 5개의 댓글'; fi
         fi
-        tree+=$'\n[39] container, Text: 공지\n[53] link [오늘, 오전 9:00:01](https://slack.example/notice)\n[52] 버튼 5개의 댓글' ;;
+        tree+=$'\n[39] container, Text: 공지\n[53] link [오늘, 오전 9:00:01](https://slack.example/notice)\n[52] 버튼 5개의 댓글'
+        if [[ ${PASTE_MODE:-} == toolbar-index-drift && $polls -ge 2 ]]; then tree+=$'\n[33] 버튼 스레드의 댓글'; fi
+        tree=$(jq -nr --arg tree "$tree" '"[20] 내용 목록 daily-scrum (채널)\n"+($tree|split("\n")|map("\t"+.)|join("\n"))')
+        if [[ ${PASTE_MODE:-} == toolbar-private ]]; then tree=${tree/\(채널\)/(채널, 비공개)}; fi
+        if [[ ${PASTE_MODE:-} == toolbar-private-prefix ]]; then tree=${tree/\(채널\)/(비공개 채널)}; fi
+        if [[ ${PASTE_MODE:-} == toolbar-split ]]; then
+          tree+=$'\n[80] 내용 목록 other-channel (채널)\n\t[81] container 스크럼-예제팀: 예제팀\n\t\t[82] link [오늘, 오전 8:00:01](https://example.slack.com/archives/COTHER/p1790895609247049)\n\t\t[83] 버튼 스레드의 댓글'
+        fi
+        if [[ ${PASTE_MODE:-} == toolbar-thread-copy ]]; then
+          tree+=$'\n[70] container daily-scrum 채널의 스레드\n\t[71] 내용 목록 daily-scrum의 스레드 (채널)\n\t\t[72] container 스크럼-예제팀: 예제팀\n\t\t\t[73] link [오늘, 오전 8:00:01](https://example.slack.com/archives/CEXAMPLE/p1790895609247049)'
+        fi ;;
       thread|focused)
         tree=$'[40] container, Text: daily-scrum 채널의 스레드\n[45] container, Text: 스크럼-예제팀: 예제팀\n[46] link [오늘, 오전 8:03:01](https://slack.example/today)\n[42] 내용 목록 daily-scrum의 스레드 (채널)'
         tree=${tree//https:\/\/slack.example\/today/https:\/\/example.slack.com\/archives\/CEXAMPLE\/p1790895609247049}
@@ -549,6 +576,39 @@ for mode in normal zero reply-label workflow root-suffix loading fail-v screensh
   jq -Rn '[inputs] | (map(test("click.*--element-index (31|33|61)"))|index(true)) as $reply | (map(test("click.*--element-index 44"))|index(true)) as $editor | (map(test("hotkey.*Cmd\\+V"))|index(true)) as $paste | $reply!=null and $editor!=null and $paste!=null and $reply<$editor and $editor<$paste' < "$CALLS" | grep -Fxq true || fail 'Reply/editor/paste action sequence missing'
   if [[ $mode == zero || $mode == reply-label ]]; then ! grep -q 'set-value' "$CALLS" || fail 'Zero-comment post searched'; fi
 done
+# Toolbar-first opening, delayed reveal and channel-only selection are exercised through the CLI.
+for mode in toolbar-direct toolbar-delayed toolbar-thread-copy toolbar-private toolbar-private-prefix toolbar-split; do
+  printf 'original clipboard\n' > "$CLIPBOARD"; cp "$CLIPBOARD" "$sandbox/original"; : > "$CALLS"
+  PASTE_MODE=$mode ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-paste" --no-draft > "$sandbox/toolbar-output" 2> "$sandbox/toolbar-error" ||
+    { cat "$sandbox/toolbar-error" >&2; fail "Toolbar opening failed: $mode"; }
+  grep -q 'click .*--element-index 33 ' "$CALLS" || fail "Toolbar action was not clicked: $mode"
+  if [[ $mode == toolbar-delayed ]]; then
+    [[ $(grep -c 'click .*--element-index 30 ' "$CALLS") == 1 && $(cat "$STAGE.reply.polls") == 3 ]] || fail 'Delayed toolbar did not use one container click and bounded reobservation'
+  else ! grep -q 'click .*--element-index 30 ' "$CALLS" || fail "Visible toolbar unnecessarily clicked the container: $mode"; fi
+  ! grep -Eq 'set-value|press-key|--element-index (70|71|72|73|99|100)' "$CALLS" || fail 'Zero-comment toolbar searched, selected the thread copy or sent'
+  cmp -s "$CLIPBOARD" "$sandbox/original" || fail "Toolbar opening lost clipboard: $mode"
+done
+: > "$CALLS"; rm -f "$STAGE.channel.polls"
+if PASTE_MODE=toolbar-index-drift ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-paste" --no-draft > "$sandbox/toolbar-output" 2> "$sandbox/toolbar-error"; then fail 'Toolbar index drift into another post accepted'; fi
+grep -q '클릭 직전 대상이 오늘 채널 글에서 벗어났습니다' "$sandbox/toolbar-error" || fail 'Toolbar index drift lacks fresh-root diagnostic'
+! grep -Eq 'hotkey|click .*--element-index 33 ' "$CALLS" || fail 'Fresh toolbar moved to another post was clicked/pasted'
+for mode in toolbar-missing toolbar-ambiguous toolbar-initial-ambiguous; do
+  capture_dir="$HOME/Library/Logs/routine-automation/slack-format"
+  rm -rf -- "$capture_dir"; : > "$CALLS"
+  if PASTE_MODE=$mode ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-paste" --no-draft > "$sandbox/toolbar-output" 2> "$sandbox/toolbar-error"; then fail "Unsafe toolbar accepted: $mode"; fi
+  captures=("$capture_dir"/*.txt)
+  [[ ${#captures[@]} == 1 && -f ${captures[0]} && $(stat -f %Lp "${captures[0]}") == 600 ]] || fail "Toolbar failure left no private diagnostic: $mode"
+  grep -q '^# 폴링 추적' "${captures[0]}" || fail "Toolbar failure lacks poll trace: $mode"
+  count=2; [[ $mode != toolbar-missing ]] || count=0
+  poll=3; [[ $mode != toolbar-initial-ambiguous ]] || poll=0
+  grep -q "^reply poll $poll: state=성공 root_match=true candidates=$count$" "${captures[0]}" || fail "Toolbar failure lacks candidate count: $mode"
+  ! grep -Eq 'toolbar-secret|비밀본문|테스트_사용자|example\.slack\.com|CEXAMPLE' "${captures[0]}" "$sandbox/toolbar-output" "$sandbox/toolbar-error" || fail 'Toolbar diagnostic exposed sensitive content'
+  ! grep -Eq 'hotkey|click .*--element-index (33|62) ' "$CALLS" || fail "Ambiguous or missing toolbar was clicked/pasted: $mode"
+  if [[ $mode == toolbar-initial-ambiguous ]]; then
+    ! grep -q 'click .*--element-index 30 ' "$CALLS" || fail 'Ambiguous visible toolbar clicked its container'
+  else [[ $(cat "$STAGE.reply.polls") == 3 && $(grep -c 'click .*--element-index 30 ' "$CALLS") == 1 ]] || fail 'Toolbar retry bound/container count incorrect'; fi
+done
+printf 'PASS: 무댓글 툴바 직접 클릭·지연 재관찰·0/2개 진단 가림·채널 본문 한정\n'
 for mode in old duplicate delayed-duplicate nonempty no-reply multi wrong-root wrong-url never-ready initially-checked checkbox-click checkbox-paste background changed-target; do
   printf 'original clipboard\n' > "$CLIPBOARD"; cp "$CLIPBOARD" "$sandbox/original"; : > "$CALLS"
   if PASTE_MODE=$mode ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-paste" --no-draft > "$sandbox/abort-output" 2> "$sandbox/abort-error"; then fail "Unsafe target accepted: $mode"; fi
@@ -600,6 +660,7 @@ cat > "$HOME/.local/bin/date" <<'DATE'
 #!/usr/bin/env bash
 if [[ ${1-} == -r && ${3-} == '+%H%M' && -n ${AUTO_CLOCK:-} ]]; then echo "$AUTO_CLOCK"
 elif [[ ${1-} == +%s && -f $AUTO_EPOCH_FILE ]]; then cat "$AUTO_EPOCH_FILE"
+elif [[ ${!#} == '+%H%M' && -n ${MORNING_CLOCK_FILE:-} ]]; then cat "$MORNING_CLOCK_FILE"
 else exec /bin/date "$@"; fi
 DATE
 cat > "$HOME/.local/bin/perl" <<'PERL'
@@ -935,6 +996,7 @@ for step in scrum-collect scrum-draft scrum-paste; do
   cat > "$morning_copy/$step" <<'STEP'
 #!/usr/bin/env bash
 printf '%s %s\n' "${0##*/}" "$*" >> "$CALLS"
+if [[ ${0##*/} == scrum-collect && -n ${MORNING_CLOCK_FILE:-} ]]; then printf '1145\n' > "$MORNING_CLOCK_FILE"; fi
 if [[ ${0##*/} == scrum-paste ]]; then
   [[ $1 == --auto && $(cat "$HOME/Library/Logs/routine-automation/.morning.lock/pid") == "$ROUTINE_MORNING_LOCK_PID" ]] || exit 87
   exit "${MORNING_PASTE_EXIT:-0}"
@@ -957,13 +1019,49 @@ bash "$morning_copy/morning" > "$sandbox/morning-order"
 grep -v '^notification ' "$CALLS" > "$sandbox/actual-order"
 printf '%s\n' 'omp update' 'claude update' 'npm update -g' 'scrum-collect ' 'scrum-draft ' 'scrum-paste --auto' 'aws-session-check ' > "$sandbox/expected-order"
 cmp -s "$sandbox/actual-order" "$sandbox/expected-order" || fail 'Morning actual stage order or --auto differs'
+[[ ! -e $out/2026-09-28.pasted ]] || fail 'Morning no-paste regression unexpectedly has a completion marker'
+grep -q 'scrum-paste:대기(.*exit 0)' "$sandbox/morning-order" || fail 'Morning reported an exit-0 no-paste as completion'
+grep -q ' END scrum-paste 대기 .* exit=0$' "$HOME/Library/Logs/routine-automation/morning-2026-09-28.log" || fail 'Morning log omitted no-paste waiting status'
+grep -q '^notification .*붙여넣기 대기 — 붙여넣지 않음' "$CALLS" || fail 'Morning notification omitted no-paste waiting status'
+jq -Rse 'split("대기")|length==2' "$CALLS" > /dev/null || fail 'Morning notification duplicates waiting notice'
+! grep -q '^notification .*모든 단계 완료' "$CALLS" || fail 'Morning no-paste notification claimed completion'
+printf 'PASS: morning exit 0·미붙여넣기 대기 로그·요약·알림 구분\n'
 : > "$CALLS"
 MORNING_PASTE_EXIT=3 bash "$morning_copy/morning" > "$sandbox/morning-terminal"
-grep -q 'scrum-paste:ok(.*exit 3)' "$sandbox/morning-terminal" || fail 'Morning counted terminal paste as failure'
+grep -q 'scrum-paste:종결(.*exit 3)' "$sandbox/morning-terminal" || fail 'Morning terminal paste is neither failure nor completion'
+! grep -q '^notification .*모든 단계 완료' "$CALLS" || fail 'Morning terminal result claimed completion'
 [[ $(grep -c '^notification ' "$CALLS") == 1 ]] || fail 'Morning terminal result duplicated notification'
 : > "$CALLS"
 MORNING_PASTE_EXIT=4 bash "$morning_copy/morning" > "$sandbox/morning-deferred"
-grep -q 'scrum-paste:ok(.*exit 4)' "$sandbox/morning-deferred" || fail 'Morning counted input deferral as failure'
+grep -q 'scrum-paste:대기(.*exit 4)' "$sandbox/morning-deferred" || fail 'Morning input deferral is neither failure nor completion'
+! grep -q '^notification .*모든 단계 완료' "$CALLS" || fail 'Morning deferred result claimed completion'
+touch "$out/2026-09-28.pasted" "$out/2026-09-28.paste-attention"
+: > "$CALLS"
+MORNING_PASTE_EXIT=3 bash "$morning_copy/morning" > "$sandbox/morning-attention"
+{ grep -q 'scrum-paste:확인 필요(' "$sandbox/morning-attention" && grep -q '^notification .*붙여넣었을 수 있음.*전송 금지' "$CALLS"; } || fail 'Morning attention does not beat completion marker or retain possible-paste warning'
+! grep -q '^notification .*붙여넣기 대기' "$CALLS" || fail 'Morning attention was called pending'
+rm "$out/2026-09-28.paste-attention"
+: > "$CALLS"
+MORNING_PASTE_EXIT=4 bash "$morning_copy/morning" > "$sandbox/morning-prepared"
+{ grep -q 'scrum-paste:ok(' "$sandbox/morning-prepared" && grep -q '^notification .*입력창에 준비했습니다' "$CALLS"; } || fail 'Morning pasted marker does not beat deferred exit'
+rm "$out/2026-09-28.pasted"
+touch "$out/2026-09-28.paste-skipped"
+: > "$CALLS"
+bash "$morning_copy/morning" > "$sandbox/morning-marked-terminal"
+{ grep -q 'scrum-paste:종결(' "$sandbox/morning-marked-terminal" && grep -q '^notification .*자동 붙여넣기 종결' "$CALLS"; } || fail 'Morning skipped marker was called pending'
+rm "$out/2026-09-28.paste-skipped"
+touch "$out/../autopaste.disabled"
+: > "$CALLS"
+bash "$morning_copy/morning" > "$sandbox/morning-disabled"
+{ grep -q 'scrum-paste:재시도 없음(' "$sandbox/morning-disabled" && grep -q '^notification .*재시도 없음' "$CALLS"; } || fail 'Morning disabled delivery was called pending'
+rm "$out/../autopaste.disabled"
+: > "$CALLS"
+ROUTINE_NOW='2026-09-28T12:00:00+09:00' bash "$morning_copy/morning" > "$sandbox/morning-window-end"
+{ grep -q 'scrum-paste:재시도 없음(' "$sandbox/morning-window-end" && grep -q '^notification .*재시도 없음' "$CALLS"; } || fail 'Morning after-window delivery was called pending'
+printf '1100\n' > "$sandbox/morning-clock"; : > "$CALLS"
+MORNING_CLOCK_FILE="$sandbox/morning-clock" bash "$morning_copy/morning" > "$sandbox/morning-crossed-window"
+{ grep -q 'scrum-paste:재시도 없음(' "$sandbox/morning-crossed-window" && grep -q '^notification .*재시도 없음' "$CALLS"; } || fail 'Morning used the startup clock after collection crossed the delivery window'
+printf 'PASS: morning exit 3/4·주의/준비/종결 표지 우선·비활성/시간 창 종료·대기 중복 없음\n'
 bash "$morning_copy/morning" --skip scrum-paste > "$sandbox/morning-skipped"
 [[ ! -e "$HOME/Library/Logs/routine-automation/.morning.lock" ]] || fail 'Morning stage file leaked its lock'
 # Restore the model/PR stubs for the existing real-draft morning smoke below.
