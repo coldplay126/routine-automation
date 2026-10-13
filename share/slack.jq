@@ -174,6 +174,26 @@ def channel_scrum_blocks: main_list_lines |
   if length==0 then error("채널 본문 목록을 확인하지 못했습니다") else map(.raw)|join("\n")|scrum_blocks end;
 def channel_scrum_block: channel_scrum_blocks |
   if length==1 then .[0] else error("채널 본문에서 오늘 스크럼 글을 하나로 식별하지 못했습니다") end;
+# The init fallback can propose an unknown channel, but navigation must verify it first.
+def channel_list_identified:
+  main_list_lines as $lines |
+  [$lines[].body|select(timestamp_link)] as $timestamps |
+  # Forwarded/shared attachments may carry another channel's timestamp link; the configured
+  # channel must own strictly more timestamp links than all other channels combined.
+  if ($timestamps|length)>0 then
+    ($ARGS.named.routine.slack.channel_id // "") as $channel |
+    [$timestamps[]|[capture("/archives/(?<id>[CG][A-Z0-9]+)/").id][0]==$channel] as $own |
+    $channel!="" and ([$own[]|select(.)]|length) > ([$own[]|select(.|not)]|length)
+  else ($lines|length)>0 and (slack_settings.channel_name|length)>0 and
+    ($lines[0].body|capture("^내용 목록 (?<name>.+?)[[:space:]]+\\((?:비공개[[:space:]]+)?채널").name|
+      sub("^\\*[[:space:]]*";"")|ltrimstr("#"))==slack_settings.channel_name end;
+# Scroll only the selected channel list; the last exact timestamp link is the progress marker.
+def channel_scroll_position:
+  main_list_lines as $lines |
+  if (channel_list_identified|not) or ($lines|length)==0 or $lines[0].index==null then error("설정된 채널 스크롤 목록을 확인하지 못했습니다")
+  else {index:$lines[0].index,
+    last:([$lines[].body|select(timestamp_link)|capture("^link \\[(?<label>[^]]+)\\]\\((?<url>https?://[^)]+)\\)$")|
+      .+{time:([.url|capture("/p(?<p>[0-9]{16})(\\?[^#]*)?$").p|tonumber][0] // 0)}]|last // null)} end;
 def thread_lines:
   ax_lines as $lines | [range(0;$lines|length)|select(slack_settings.channel_name|length>0)|select($lines[.].body|contains(slack_settings.channel_name+slack_labels.thread_panel))] as $starts |
   if ($starts|length)!=1 then error("스크럼 스레드 패널을 확인하지 못했습니다") else $lines[$starts[0]:] end;

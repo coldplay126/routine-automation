@@ -21,7 +21,7 @@
 | `routine status` | 오늘 소스 건수·오류, 초안 항목·확인 필요, 전달 표지, extra_steps 결과, 다음 예약 |
 | `routine off [날짜\|범위] [메모]` / `off --remove 날짜\|범위` | 개인 휴무 등록·삭제. 인자 없으면 앞으로 60일 공휴일·휴무·예외 목록 |
 | `routine work 날짜` / `work --remove 날짜` | 개인 예외 근무일 지정·삭제. 휴가·공휴일·주말보다 우선 |
-| `routine run` | 설정된 extra_steps → collect → draft → deliver → Jira 제안 생성 → 마지막 AWS 단계 |
+| `routine run` | 설정된 extra_steps → collect → draft → deliver → Jira 제안 생성 → 마지막 AWS 단계(로그인 창 없이 검사; 필요하면 수동 로그인 안내) |
 | `routine collect` | `--since`, `--until`, `--out`, `--sources git,prs,sessions,claude_sessions,jira,notion,slack` |
 | `routine draft` | `--date`, `--out`, `--engine`, `--model`, `--project`, `--no-llm`, 선택형 `--slack` |
 | `routine review [--date YYYY-MM-DD] [--no-open]` | 로컬 초안 검토 화면 생성·열기. `--no-open`은 경로만 출력 |

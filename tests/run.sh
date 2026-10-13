@@ -383,6 +383,7 @@ if OMP_TIMEOUT=1 "$repo/bin/morning" --only omp-update > "$sandbox/timed-out"; t
 if OMP_TIMEOUT=137 "$repo/bin/morning" --only omp-update > "$sandbox/killed-timeout"; then fail 'Forced timeout reported success'; fi
 [[ $(cat "$sandbox/killed-timeout") == *'omp-update:fail(timeout, '*'exit 137)'* ]] || fail 'Forced timeout not distinguished'
 
+"$repo/tests/aws-session.sh"
 "$repo/tests/calendar.sh"
 "$repo/tests/scrum.sh"
 "$repo/tests/team-package.sh"

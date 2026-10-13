@@ -261,6 +261,74 @@ orca=$(find_orca) || { echo 'Orca를 실행할 수 없습니다. /Applications/O
 ensure_orca_runtime "$orca" || { echo 'Orca 앱 런타임이 시작되지 않았습니다. Orca를 실행한 뒤 다시 시도하세요.' >&2; exit 2; }
 phase='Slack 스레드 확인'; phase_id=thread
 state() { "$orca" computer get-app-state --app com.tinyspeck.slackmacgap --no-screenshot --json > "$work/state.json"; }
+# Slack can reopen a channel at an old scroll position, including after duplicate search.
+open_scrum_channel() {
+  local position last previous=null unchanged=0 moved=0 last_label scroll_status scroll_result
+  local last_time previous_time=0 settled=0
+  channel_scrolls=0 channel_bottom=0
+  : > "$work/channel-scroll-trace"
+  auto_input_guard
+  open "slack://channel?team=$(routine_get slack.team_id)&id=$(routine_get slack.channel_id)"
+  auto_gui_activity
+  sleep 3
+  while :; do
+    if ! state; then
+      printf 'channel scroll %s: state=실패\n' "$channel_scrolls" >> "$work/channel-scroll-trace"
+      slack_format_notice '채널/스크롤 상태' "$work/state.json" "$work/channel-scroll-trace"
+      fail '채널 스크롤 상태를 읽지 못했습니다'
+    fi
+    if ! jq -L "$share_dir" -e 'include "slack"; tree_text|channel_list_identified' "$work/state.json" >/dev/null; then
+      printf 'channel scroll %s: configured_channel=false\n' "$channel_scrolls" >> "$work/channel-scroll-trace"
+      slack_format_notice '채널/설정 채널 미확인' "$work/state.json" "$work/channel-scroll-trace"
+      fail '설정된 채널 본문을 확인하지 못했습니다'
+    fi
+    blocks=$(jq -L "$share_dir" -ec 'include "slack"; tree_text|channel_scrum_blocks' "$work/state.json") ||
+      { slack_format_notice '채널/스크럼 글' "$work/state.json" "$work/channel-scroll-trace"; fail '오늘 스크럼 글을 확인하지 못했습니다'; }
+    if [[ $(jq -r 'length' <<< "$blocks") != 0 ]]; then return 0; fi
+    position=$(jq -L "$share_dir" -ec 'include "slack"; tree_text|channel_scroll_position' "$work/state.json") ||
+      { slack_format_notice '채널/스크롤 목록' "$work/state.json" "$work/channel-scroll-trace"; fail '채널 스크롤 목록을 확인하지 못했습니다'; }
+    last=$(jq -c '.last' <<< "$position")
+    last_label=$(jq -r '.last.label // "미확인"' <<< "$position")
+    last_time=$(jq -r '.last.time // 0' <<< "$position")
+    if ((previous_time>0 && last_time>previous_time)); then moved=1
+    elif ((last_time<previous_time)); then moved=0; fi
+    if [[ $last != null && $last == "$previous" ]]; then ((unchanged+=1)); else unchanged=0; settled=0; fi
+    printf 'channel scroll %s: state=성공 today=0 last_date=%s unchanged=%s moved=%s\n' "$channel_scrolls" "$last_label" "$unchanged" "$moved" >> "$work/channel-scroll-trace"
+    if ((unchanged>=2)); then
+      if ((moved)); then
+        if ((settled==0)); then
+          printf 'channel scroll %s: bottom_wait=1.5s\n' "$channel_scrolls" >> "$work/channel-scroll-trace"
+          settled=1
+          sleep 1.5
+          continue
+        fi
+        printf 'channel scroll %s: bottom_recheck=성공\n' "$channel_scrolls" >> "$work/channel-scroll-trace"
+        channel_bottom=1; return 0
+      fi
+      slack_format_notice '채널/스크롤 움직임·맨 아래 미확인' "$work/state.json" "$work/channel-scroll-trace"
+      fail '채널 스크롤 움직임과 맨 아래를 확인하지 못했습니다'
+    fi
+    if ((channel_scrolls>=8)); then
+      slack_format_notice '채널/스크롤 상한·맨 아래 미확인' "$work/state.json" "$work/channel-scroll-trace"
+      fail '채널 맨 아래를 확인하지 못했습니다'
+    fi
+    previous=$last
+    previous_time=$last_time
+    auto_input_guard
+    if "$orca" computer scroll --app com.tinyspeck.slackmacgap --element-index "$(jq -r '.index' <<< "$position")" --direction down --pages 1 --no-screenshot --json > "$work/channel-scroll-result.json"; then scroll_status=0
+    else scroll_status=$?; fi
+    auto_gui_activity
+    ((channel_scrolls+=1))
+    scroll_result=$(jq -ec '{json_valid:true,
+      ok:(if (.ok|type)=="boolean" then .ok else null end),
+      result_success:(if (.result.success|type)=="boolean" then .result.success else null end),
+      error_present:(.error!=null or .result.error!=null)}' "$work/channel-scroll-result.json" 2>/dev/null) || scroll_result='{"json_valid":false}'
+    printf 'channel scroll %s: command_exit=%s result=%s\n' "$channel_scrolls" "$scroll_status" "$scroll_result" >> "$work/channel-scroll-trace"
+    ((scroll_status==0)) ||
+      { slack_format_notice '채널/스크롤 실패' "$work/state.json" "$work/channel-scroll-trace"; fail '채널 스크롤에 실패했습니다'; }
+    sleep 0.5
+  done
+}
 # Re-check both the current index and its exact label immediately before clicking.
 click() {
   local index=$1 root=${2:-} label
@@ -304,15 +372,12 @@ before_hotkey() {
   if ((!replace)) && [[ -n $(jq -r '.value' <<< "$current") ]]; then terminal '입력창이 비어 있지 않습니다'; fi
   auto_input_guard
 }
-auto_input_guard
-open "slack://channel?team=$(routine_get slack.team_id)&id=$(routine_get slack.channel_id)"
-auto_gui_activity
-sleep 3
-state
-blocks=$(jq -L "$share_dir" -ec 'include "slack"; tree_text | channel_scrum_blocks' "$work/state.json") || { slack_format_notice '채널/스크럼 글' "$work/state.json"; fail '오늘 스크럼 글을 확인하지 못했습니다'; }
+open_scrum_channel
 if [[ $(jq -r 'length' <<< "$blocks") == 0 ]]; then
+  ((channel_bottom)) || fail '채널 맨 아래를 확인하지 못했습니다'
+  cat "$work/channel-scroll-trace" >&2
   if ((auto)) && ((10#$clock >= 10#$no_post_after)); then terminal '오늘 스크럼 글 없음'; fi
-  fail "오늘 스크럼 글 없음 — $(routine_get delivery.no_post_after)까지 재시도"
+  fail "오늘 스크럼 글 없음 (종결 기준: $(routine_get delivery.no_post_after))"
 fi
 block=$(jq -er 'if length==1 then .[0] else error("오늘 스크럼 글이 여러 개입니다") end' <<< "$blocks") || fail '오늘 스크럼 글이 여러 개이거나 모호합니다'
 expected_root_url=$(jq -L "$share_dir" -er 'include "slack"; .lines[].body|select(today_timestamp)|capture("\\((?<url>https?://[^)]+)\\)").url' <<< "$block") || fail '오늘 스크럼 루트 링크를 확인하지 못했습니다'
@@ -342,13 +407,9 @@ if [[ -n $reply ]]; then
   # Search changes the pane and all AX indexes. Reopen and identify the post
   # again, then compare its exact permalink before using the new reply index.
   phase='검색 후 Slack 스크럼 글 재확인'; phase_id=thread
-  auto_input_guard
-  open "slack://channel?team=$(routine_get slack.team_id)&id=$(routine_get slack.channel_id)"
-  auto_gui_activity
-  sleep 3
-  state
+  open_scrum_channel
   block=$(jq -L "$share_dir" -ec 'include "slack"; tree_text|channel_scrum_block' "$work/state.json") ||
-    { slack_format_notice '채널/검색 후 스크럼 글' "$work/state.json"; fail '검색 후 오늘 스크럼 글을 다시 식별하지 못했습니다'; }
+    { slack_format_notice '채널/검색 후 스크럼 글' "$work/state.json" "$work/channel-scroll-trace"; fail '검색 후 오늘 스크럼 글을 다시 식별하지 못했습니다'; }
   current_root_url=$(jq -L "$share_dir" -er 'include "slack"; .lines[].body|select(today_timestamp)|capture("\\((?<url>https?://[^)]+)\\)").url' <<< "$block") ||
     fail '검색 후 스크럼 루트 링크를 확인하지 못했습니다'
   [[ $current_root_url == "$expected_root_url" ]] || fail '검색 후 오늘 스크럼 루트 URL이 바뀌었습니다'

@@ -9,7 +9,7 @@ share_dir="$script_dir/../share"
 # shellcheck source=../share/config.sh
 source "$share_dir/config.sh"
 setup_marker="$HOME/Library/Application Support/routine-automation/.setup-first-run"
-setup_request=''; lock_owned=0; disk_access=unverified
+setup_request=''; lock_owned=0; disk_access=unverified; aws_work=''
 if [[ -f $setup_marker ]]; then
   setup_request=$(cat "$setup_marker")
   if [[ -d $HOME/Library/Mail ]]; then
@@ -27,6 +27,7 @@ finish() {
     mv "$temp" "$result"
     if [[ -f $setup_marker && $(cat "$setup_marker") == "$setup_request" ]]; then rm -f "$setup_marker"; fi
   fi
+  [[ -z $aws_work ]] || rm -rf -- "$aws_work"
   if ((lock_owned)); then rm -f -- "$lock/pid" "$lock/stage"; rmdir "$lock"; fi
   exit "$exit_code"
 }
@@ -133,7 +134,72 @@ else
   echo 'morning: gtimeout or timeout required' | tee -a "$log" >&2
   exit 1
 fi
-failures=() summary=() failures_count=0 paste_status='' paste_notice=''
+# Reuse the user's profile/account checks, but never let an unattended run start login.
+run_aws_session() {
+  local checker aws_command code profiles
+  checker=$(type -P aws-session-check) || { echo 'aws-session-check: command not found' >> "$log"; return 127; }
+  aws_command=$(type -P aws || true)
+  aws_work=$(mktemp -d "${TMPDIR:-/tmp}/routine-aws-session.XXXXXXXX") || return 1
+  cat > "$aws_work/aws" <<'AWS'
+#!/usr/bin/env bash
+set -euo pipefail
+profile='(기본 프로필)' previous=''
+for argument in "$@"; do
+  if [[ $previous == --profile ]]; then profile=$argument; fi
+  case $argument in --profile=*) profile=${argument#--profile=} ;; esac
+  previous=$argument
+done
+# Only the first positional token is the subcommand. Long options consume one value,
+# except known boolean flags and --option=value, which already includes its value.
+subcommand='' previous=''
+for argument in "$@"; do
+  if [[ $argument == -* ]]; then previous=$argument; continue; fi
+  case $previous in
+    --debug|--no-verify-ssl|--no-paginate|--no-sign-request|--no-cli-pager|--cli-auto-prompt|--no-cli-auto-prompt|--*=*) ;;
+    --*) previous=$argument; continue ;;
+  esac
+  subcommand=$argument
+  break
+done
+if [[ $subcommand == login ]]; then
+  printf '%s\n' "$profile" >> "$ROUTINE_AWS_LOGIN_PROFILES"
+  printf 'routine: aws login blocked: %s\n' "$profile" >&2
+  exit 70
+fi
+[[ -n $ROUTINE_AWS_COMMAND ]] || { echo 'routine: aws command missing' >&2; exit 127; }
+exec "$ROUTINE_AWS_TIMEOUT" -k 2 15 "$ROUTINE_AWS_COMMAND" "$@"
+AWS
+  chmod 700 "$aws_work/aws" || return 1
+  : > "$aws_work/login-profiles"
+  if (umask "$original_umask"; exec "$timeout_cmd" -k 2 60 env -u 'BASH_FUNC_aws%%' \
+      PATH="$aws_work:$PATH" ZDOTDIR="$aws_work" ROUTINE_AWS_COMMAND="$aws_command" ROUTINE_AWS_TIMEOUT="$timeout_cmd" \
+      ROUTINE_AWS_LOGIN_PROFILES="$aws_work/login-profiles" "$checker" </dev/null > "$aws_work/output" 2>&1); then code=0
+  else code=$?; fi
+  cat "$aws_work/output" >> "$log"
+  if ! jq -Rrse --rawfile blocked "$aws_work/login-profiles" '
+    split("\n") as $lines | ($blocked|split("\n")|map(select(length>0))) as $profiles |
+    [$lines[]|select(contains("starting aws login"))] |
+    all(.[]; . as $line | any($profiles[]; . as $profile |
+      $line==($profile+": session expired; starting aws login") and
+      ($lines|index("routine: aws login blocked: "+$profile))!=null))' "$aws_work/output" >/dev/null; then
+    aws_session_notice='AWS 로그인 차단 우회 의심 — 터미널에서 aws-session-check 확인'
+    printf '%s\n' "$aws_session_notice" >> "$log"
+    return 1
+  fi
+  if [[ -s $aws_work/login-profiles ]]; then
+    profiles=$(command jq -Rrs 'split("\n")|map(select(length>0))|unique|join(", ")' "$aws_work/login-profiles") || return 1
+    aws_session_notice="AWS 로그인 필요: $profiles — 터미널에서 aws-session-check 실행"
+    # A blocked login must not hide a different profile's identity/network failure.
+    aws_session_only_login=$(command jq -Rrs --rawfile blocked "$aws_work/login-profiles" '
+      ($blocked|split("\n")|map(select(length>0))|unique) as $profiles |
+      split("\n")|map(select(length>0))|all(.[]; . as $line |
+        test("^.+: valid \\([^\\r\\n]+\\)$") or
+        any($profiles[]; $line==(.+": session expired; starting aws login") or
+          $line==(.+": aws login failed") or $line==("routine: aws login blocked: "+.)))' "$aws_work/output") || return 1
+  fi
+  return "$code"
+}
+failures=() summary=() failures_count=0 paste_status='' paste_notice='' aws_session_notice='' aws_session_only_login=false
 paste_out="$HOME/Library/Application Support/routine-automation/scrum/$day"
 paste_window_end=$(routine_get delivery.window.end); paste_window_end=${paste_window_end/:/}
 for index in "${!steps[@]}"; do
@@ -161,12 +227,15 @@ for index in "${!steps[@]}"; do
     jira-propose) args=(env -u ROUTINE_ALLOW_GUI "$script_dir/jira-propose") ;;
   esac
   printf '%s START %s\n' "$(date '+%FT%T%z')" "$step" >> "$log"
-  if (umask "$original_umask"; exec "$timeout_cmd" -k 30 600 "${args[@]}" </dev/null >> "$log" 2>&1); then status=ok; code=0
-  else
-    code=$?
-    if [[ $step == scrum-paste && ( $code == 3 || $code == 4 ) ]]; then status=대기
-    else status=fail; failures+=("$step"); ((failures_count+=1)); fi
-  fi
+  if [[ $step == aws-session ]]; then
+    if run_aws_session; then code=0; else code=$?; fi
+    if [[ -n $aws_work ]]; then rm -rf -- "$aws_work"; aws_work=''; fi
+  elif (umask "$original_umask"; exec "$timeout_cmd" -k 30 600 "${args[@]}" </dev/null >> "$log" 2>&1); then code=0
+  else code=$?; fi
+  if [[ $step == aws-session && $aws_session_only_login == true && $code != 124 && $code != 137 ]]; then status='로그인 필요'
+  elif ((code==0)); then status=ok
+  elif [[ $step == scrum-paste && ( $code == 3 || $code == 4 ) ]]; then status=대기
+  else status=fail; failures+=("$step"); ((failures_count+=1)); fi
   if [[ $step == scrum-paste ]]; then
     paste_clock=$(date '+%H%M')
     if [[ -n ${ROUTINE_NOW:-} ]]; then
@@ -196,7 +265,7 @@ if ((failures_count)); then
 else
   notice='모든 단계 완료'
 fi
-if [[ -n $paste_status && $paste_status != ok && $paste_status != fail ]]; then
+if [[ -n $paste_status && $paste_status != ok && $paste_status != fail || -n $aws_session_notice ]]; then
   ((failures_count)) || notice='단계 실행 종료'
 fi
 if [[ -n $nonwork_reason ]]; then
@@ -238,5 +307,6 @@ if [[ -n $update_notice ]]; then
   printf '%s\n' "$update_notice" | tee -a "$log"
   notice+=$'\n'"$update_notice"
 fi
+if [[ -n $aws_session_notice ]]; then notice+=$'\n'"$aws_session_notice"; fi
 notify "$notice"
 ((failures_count == 0))

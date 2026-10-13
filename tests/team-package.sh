@@ -406,7 +406,15 @@ echo '[[{"type":"public.utf8-plain-text","data":"b3JpZ2luYWw="}]]' > "$sandbox/s
 "$routine" run --only scrum-draft --only scrum-paste > "$sandbox/morning"
 /usr/bin/osascript -l JavaScript "$repo/tests/pasteboard.js" read > "$sandbox/board.json"
 jq -e '.[0][0].data=="b3JpZ2luYWw="' "$sandbox/board.json" >/dev/null || fail 'Unattended clipboard changed'
-! grep -q 'orca\|clipboard.js\|open ' "$RECORD" || fail 'Unattended clipboard mode touched UI'
+no_clipboard_gui_pattern='^(orca |open |osascript .*clipboard\.js([[:space:]]|$))'
+for root in /fixture/Documents/GitHub/routine-automation /fixture/orca/workspaces/routine-automation/scrum-channel-scroll; do
+  ! printf 'gtimeout -k 30 600 %s/bin/scrum-draft\n' "$root" | grep -Eq "$no_clipboard_gui_pattern" || fail 'Repository path was mistaken for clipboard GUI execution'
+  printf 'osascript -l JavaScript %s/share/clipboard.js backup\n' "$root" | grep -Eq "$no_clipboard_gui_pattern" || fail 'Clipboard GUI assertion missed a clipboard script'
+done
+for call in 'orca computer get-app-state' 'open slack://channel'; do
+  printf '%s\n' "$call" | grep -Eq "$no_clipboard_gui_pattern" || fail 'Clipboard GUI assertion missed an actual command'
+done
+! grep -Eq "$no_clipboard_gui_pattern" "$RECORD" || fail 'Unattended clipboard mode touched UI'
 : > "$RECORD"
 ROUTINE_NOW='2026-09-28T08:30:00+09:00' "$routine" paste --auto --no-draft > "$sandbox/clipboard-auto"
 [[ ! -s $RECORD ]] || fail 'Clipboard auto paste called GUI/clipboard commands'
@@ -414,7 +422,7 @@ ROUTINE_NOW='2026-09-28T08:30:00+09:00' "$routine" paste --auto --no-draft > "$s
 /usr/bin/osascript -l JavaScript "$repo/tests/pasteboard.js" read > "$sandbox/board.json"
 jq -e 'any(.[0][];.type=="public.html") and any(.[0][];.type=="public.utf8-plain-text")' "$sandbox/board.json" >/dev/null || fail 'Copy rich formats missing'
 grep -Fq 'open slack://channel?team=TEXAMPLE&id=CEXAMPLE' "$RECORD" || fail 'Copy missing deeplink'
-! grep -q 'orca' "$RECORD" || fail 'Copy manipulated editor'
+! grep -q '^orca ' "$RECORD" || fail 'Copy manipulated editor'
 # Claude Code records: same window and bounded selection, independent evidence identities.
 base="$sandbox/claude-projects/project"; mkdir -p "$base"
 printf '%s\n' '{"type":"user","sessionId":"same","timestamp":"2026-09-25T01:00:00.000Z","cwd":"/fixture","message":{"role":"user","content":"예제 작업"}}' > "$base/session.jsonl"

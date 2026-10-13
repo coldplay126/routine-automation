@@ -108,7 +108,7 @@ setup의 영구 LaunchAgent/복사 앱은 **저장된 설정**으로만 만듭�
 | `morning.extra_steps.omp_update` | bool, false | `omp update` |
 | `morning.extra_steps.claude_update` | bool, false | `claude update` |
 | `morning.extra_steps.npm_update` | bool, false | `npm update -g` |
-| `morning.extra_steps.aws_session` | bool, false | `aws-session-check`, 항상 마지막 |
+| `morning.extra_steps.aws_session` | bool, false | `aws-session-check`, 항상 마지막. 로그인 창 없이 검사하며 만료 시 수동 로그인 안내; 다른 오류는 실패 |
 | `morning.extra_steps.jira_propose` | bool, false | `jira.enabled`일 때 읽기 전용 Jira 제안 생성. AWS 직전. 최초 setup 후 실행에서는 건너뜀 |
 | `launchd.label_prefix` | string, `com.<$USER>.routine` | `.morning`/`.scrum-paste` 라벨 앞부분 |
 | `timezone` | string/null, null=시스템 | 수집·초안·예약 표시 시간대 |

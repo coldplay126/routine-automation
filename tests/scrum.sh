@@ -69,11 +69,15 @@ echo com.tinyspeck.slackmacgap > "$FOREGROUND"
 if [[ ${AUTO_SELF_RESET:-0} == 1 ]]; then perl -MTime::HiRes=time -e 'printf "%.0f\n", time*1000' > "$HID_RESET_EPOCH"; fi
 [[ ${PASTE_MODE:-} != signal-open ]] || kill -TERM "$PPID"
 if [[ ${1-} == -a ]]; then echo search > "$STAGE"; else echo channel > "$STAGE"; fi
-rm -f -- "$STAGE.polls" "$STAGE.pasted" "$STAGE.reply.polls"
+rm -f -- "$STAGE.polls" "$STAGE.pasted" "$STAGE.reply.polls" "$STAGE.scrolls" "$STAGE.scroll-settled"
 if [[ ${1-} == -a ]]; then rm -f -- "$STAGE".*.polls "$STAGE.cleared"; fi
 OPEN
 cat > "$HOME/.local/bin/sleep" <<'SLEEP'
 #!/usr/bin/env bash
+if [[ ${1:-} == 1.5 ]]; then
+  printf 'channel-settle 1.5\n' >> "$CALLS"
+  if [[ ${PASTE_MODE:-} == scroll-settling ]]; then touch "$STAGE.scroll-settled"; fi
+fi
 exit 0
 SLEEP
 cat > "$HOME/.local/bin/pbpaste" <<'PASTE'
@@ -139,6 +143,10 @@ case $2 in
     [[ ${PASTE_MODE:-} != child-three ]] || exit 3
     [[ $stage == focused ]] || exit 88
     [[ " $* " != *' Cmd+V '* ]] || touch "$STAGE.pasted" ;;
+  scroll)
+    [[ $stage == channel && " $* " == *' --element-index 20 '* && " $* " == *' --direction down '* && " $* " == *' --pages 1 '* ]] || exit 87
+    scrolls=$(cat "$STAGE.scrolls" 2>/dev/null || echo 0); echo "$((scrolls+1))" > "$STAGE.scrolls"
+    printf '{"ok":true,"result":{"success":true,"text":"scroll-secret 비밀본문"}}\n' ;;
   get-app-state)
     focus=null
     case $stage in
@@ -242,11 +250,30 @@ case $2 in
             tree+=$'\n[31] 버튼 12개의 댓글'
           else tree+=$'\n[31] 버튼 2개의 댓글'; fi
           if [[ -f $STAGE.searched ]]; then tree=${tree/$'\n[31]'/$'\n[61]'}; fi
-          if [[ ${PASTE_MODE:-} == multi ]]; then tree+=$'\n[50] container, Text: 스크럼-예제팀: 예제팀\n[51] link [오늘, 오전 8:02:01](https://slack.example/other)\n[52] 버튼 5개의 댓글'; fi
+          if [[ ${PASTE_MODE:-} == multi ]]; then tree+=$'\n[50] container, Text: 스크럼-예제팀: 예제팀\n[51] link [오늘, 오전 8:02:01](https://example.slack.com/archives/CEXAMPLE/p1790895609247050)\n[52] 버튼 5개의 댓글'; fi
         fi
-        tree+=$'\n[39] container, Text: 공지\n[53] link [오늘, 오전 9:00:01](https://slack.example/notice)\n[52] 버튼 5개의 댓글'
+        if [[ ${PASTE_MODE:-} == shared-permalink ]]; then tree+=$'\n[93] link [공유된 다른 채널의 글](https://example.slack.com/archives/COTHER/p1790895608539999)'; fi
+        if [[ ${PASTE_MODE:-} == forwarded-timestamp ]]; then tree+=$'\n[93] link [9월 27일, 오전 9:00:00](https://example.slack.com/archives/COTHER/p1790895608539999)'; fi
+        tree+=$'\n[39] container, Text: 공지\n[53] link [오늘, 오전 9:00:01](https://example.slack.com/archives/CEXAMPLE/p1790895609540000)\n[52] 버튼 5개의 댓글'
         if [[ ${PASTE_MODE:-} == toolbar-index-drift && $polls -ge 2 ]]; then tree+=$'\n[33] 버튼 스레드의 댓글'; fi
+        scrolls=$(cat "$STAGE.scrolls" 2>/dev/null || echo 0)
+        if [[ ${PASTE_MODE:-} == old ]]; then
+          notice_url=1790895609540000; ((scrolls==0)) || notice_url=$((notice_url+1))
+          tree=${tree/p1790895609540000/p$notice_url}
+        fi
+        if [[ ${PASTE_MODE:-} == scroll-* && ${PASTE_MODE:-} != scroll-wrong-today && ${PASTE_MODE:-} != scroll-conflicting-today && ( ${PASTE_MODE:-} != scroll-reopen || -f $STAGE.searched ) && ( ${PASTE_MODE:-} != scroll-settling || ! -f $STAGE.scroll-settled ) ]]; then
+          if [[ ${PASTE_MODE:-} == scroll-bottom || ${PASTE_MODE:-} == scroll-moving || ${PASTE_MODE:-} == scroll-stalled || ${PASTE_MODE:-} == scroll-label-only || ${PASTE_MODE:-} == scroll-reverse || ${PASTE_MODE:-} == scroll-settling || $scrolls -lt 2 ]]; then
+            scroll_day='10월 7일'; [[ $scrolls == 0 || ${PASTE_MODE:-} == scroll-stalled ]] || scroll_day='10월 9일'
+            scroll_url=1790895608539999
+            if [[ ${PASTE_MODE:-} == scroll-moving ]]; then scroll_url=$((scroll_url+scrolls))
+            elif [[ ${PASTE_MODE:-} == scroll-reverse ]]; then ((scrolls==0)) || scroll_url=$((scroll_url-1))
+            elif [[ ${PASTE_MODE:-} != scroll-stalled && ${PASTE_MODE:-} != scroll-label-only && $scrolls -gt 0 ]]; then scroll_url=$((scroll_url+1)); fi
+            tree=$'[90] container, Text: 스크럼-예제팀: 예제팀 token=scroll-secret 비밀본문\n[91] link ['"$scroll_day"$', 오전 8:00:01](https://example.slack.com/archives/CEXAMPLE/p'"$scroll_url"$')\n[92] 버튼 2개의 댓글'
+          fi
+        fi
         tree=$(jq -nr --arg tree "$tree" '"[20] 내용 목록 daily-scrum (채널)\n"+($tree|split("\n")|map("\t"+.)|join("\n"))')
+        if [[ ${PASTE_MODE:-} == scroll-wrong-* || ${PASTE_MODE:-} == scroll-renamed-channel ]]; then tree=${tree/daily-scrum/other-channel}; fi
+        if [[ ${PASTE_MODE:-} == scroll-wrong-* || ${PASTE_MODE:-} == scroll-conflicting-* ]]; then tree=${tree//CEXAMPLE/COTHER}; fi
         if [[ ${PASTE_MODE:-} == toolbar-private ]]; then tree=${tree/\(채널\)/(채널, 비공개)}; fi
         if [[ ${PASTE_MODE:-} == toolbar-private-prefix ]]; then tree=${tree/\(채널\)/(비공개 채널)}; fi
         if [[ ${PASTE_MODE:-} == toolbar-split ]]; then
@@ -290,7 +317,7 @@ case $2 in
   *) exit 87 ;;
 esac
 case $action in
-  click|set-value|press-key|hotkey)
+  click|set-value|press-key|hotkey|scroll)
     if [[ ${AUTO_SELF_RESET:-0} == 1 ]]; then perl -MTime::HiRes=time -e 'printf "%.0f\n", time*1000' > "$HID_RESET_EPOCH"; fi ;;
 esac
 ORCA
@@ -612,6 +639,7 @@ printf 'PASS: 무댓글 툴바 직접 클릭·지연 재관찰·0/2개 진단 �
 for mode in old duplicate delayed-duplicate nonempty no-reply multi wrong-root wrong-url never-ready initially-checked checkbox-click checkbox-paste background changed-target; do
   printf 'original clipboard\n' > "$CLIPBOARD"; cp "$CLIPBOARD" "$sandbox/original"; : > "$CALLS"
   if PASTE_MODE=$mode ROUTINE_ALLOW_GUI=1 "$repo/bin/scrum-paste" --no-draft > "$sandbox/abort-output" 2> "$sandbox/abort-error"; then fail "Unsafe target accepted: $mode"; fi
+  if [[ $mode == multi ]]; then grep -Fq '오늘 스크럼 글이 여러 개이거나 모호합니다' "$sandbox/abort-error" || fail 'Multiple today posts aborted before the ambiguity guard'; fi
   cmp -s "$CLIPBOARD" "$sandbox/original" || fail "Abort touched clipboard: $mode"
   if [[ $mode != checkbox-paste ]]; then ! grep -q 'hotkey' "$CALLS" || fail "Abort pasted: $mode"; fi
   if [[ $mode == wrong-root || $mode == wrong-url || $mode == never-ready ]]; then [[ $(cat "$STAGE.polls") == 8 ]] || fail "Unready thread was not retried until timeout: $mode"; fi
@@ -775,6 +803,76 @@ for clock in 0810 1130; do
   grep -q '^-k 30 900 /bin/bash .*scrum-paste --auto$' "$TIMEOUT_CALLS" || fail 'Complete auto execution lacks 900-second timeout'
   : > "$CALLS"; run_auto; no_auto_gui completed
 done
+# Old channel positions must be scrolled, both on the first open and after duplicate search.
+for mode in scroll-delayed scroll-reopen scroll-renamed-channel scroll-settling; do
+  auto_reset
+  AUTO_CLOCK=0907 AUTO_SELF_RESET=1 PASTE_MODE=$mode run_auto
+  expected_scrolls=4; [[ $mode != scroll-reopen ]] || expected_scrolls=2
+  [[ $mode != scroll-settling ]] || expected_scrolls=6
+  if [[ $mode == scroll-settling ]]; then
+    [[ $(grep -c '^channel-settle 1.5$' "$CALLS") == 2 && ! -e $out/2026-09-28.paste-skipped ]] || fail 'Settling recheck did not recover today instead of missing-post terminal'
+  fi
+  [[ $auto_code == 0 && -f $out/2026-09-28.pasted && $(grep -c '^orca computer scroll ' "$CALLS") == "$expected_scrolls" ]] || fail "Old channel position did not find today's post: $mode"
+  jq -Rse 'split("\n") | map(select(test("^orca computer scroll "))) | length>0 and all(.[];contains("--element-index 20 --direction down --pages 1 --no-screenshot --json"))' "$CALLS" >/dev/null || fail 'Scroll borrowed a thread or another channel list'
+  grep -q 'click .*--element-index 61 ' "$CALLS" || fail 'Scroll did not use the freshly identified today reply'
+  ! grep -Eq 'press-key|--element-index (90|91|92)' "$CALLS" || fail 'Old channel post was clicked or Return was sent'
+  [[ $(cat "$CLIPBOARD") == 'original clipboard' && $(cat "$FOREGROUND") == com.apple.Terminal ]] || fail 'Scroll recovery lost clipboard/foreground'
+done
+auto_reset
+AUTO_CLOCK=0907 PASTE_MODE=scroll-bottom run_auto
+[[ $auto_code == 3 && -f $out/2026-09-28.paste-skipped && $(grep -c '^orca computer scroll ' "$CALLS") == 3 ]] || fail 'Confirmed bottom without today was not terminal after 09:00'
+grep -Fq 'reason=오늘 스크럼 글 없음' "$out/2026-09-28.paste-skipped" || fail 'Bottom terminal lacks exact no-post reason'
+! grep -Eq '^orca computer (click|hotkey|press-key|set-value)' "$CALLS" || fail 'No-post scrolling clicked or typed'
+grep -Fq 'channel scroll 3: state=성공 today=0 last_date=10월 9일, 오전 8:00:01 unchanged=2 moved=1' "$auto_log" || fail 'Terminal no-post log lacks confirmed bottom evidence'
+grep -Fq 'channel scroll 3: command_exit=0 result={"json_valid":true,"ok":true,"result_success":true,"error_present":false}' "$auto_log" || fail 'Terminal no-post log lacks safe scroll command result'
+grep -Fq 'channel scroll 3: bottom_recheck=성공' "$auto_log" || fail 'Terminal no-post lacks delayed bottom recheck'
+jq -Rse 'split("\n") as $calls | ($calls|index("channel-settle 1.5")) as $wait |
+  $wait!=null and ($calls[$wait+1]|startswith("orca computer get-app-state "))' "$CALLS" >/dev/null || fail 'Bottom wait was not followed by fresh app state'
+auto_reset
+capture_dir="$HOME/Library/Logs/routine-automation/slack-format"
+rm -rf -- "$capture_dir"
+AUTO_CLOCK=0907 PASTE_MODE=scroll-moving run_auto
+[[ $auto_code == 1 && ! -e $out/2026-09-28.paste-skipped && ! -e $out/2026-09-28.paste-attention && $(grep -c '^orca computer scroll ' "$CALLS") == 8 ]] || fail 'Unconfirmed channel bottom was terminal or exceeded scroll bound'
+captures=("$capture_dir"/*.txt)
+[[ ${#captures[@]} == 1 && -f ${captures[0]} && $(stat -f %Lp "${captures[0]}") == 600 && $(stat -f %Lp "$capture_dir") == 700 ]] || fail 'Scroll bound lacks private diagnostic'
+grep -Fq 'channel scroll 8: state=성공 today=0 last_date=10월 9일, 오전 8:00:01 unchanged=0' "${captures[0]}" || fail 'Scroll diagnostic lacks count/date/progress summary'
+! grep -Eq 'scroll-secret|비밀본문|daily-scrum|CEXAMPLE|example.slack.com' "${captures[0]}" || fail 'Scroll diagnostic leaked screen content or identifiers'
+grep -Fq 'channel scroll 8: command_exit=0 result={"json_valid":true,"ok":true,"result_success":true,"error_present":false}' "${captures[0]}" || fail 'Scroll diagnostic omitted command result'
+for mode in scroll-wrong-channel scroll-wrong-today scroll-conflicting-id scroll-conflicting-today scroll-stalled scroll-label-only scroll-reverse; do
+  auto_reset
+  rm -rf -- "$capture_dir"
+  AUTO_CLOCK=0907 PASTE_MODE=$mode run_auto
+  expected_scrolls=0; [[ $mode != scroll-stalled ]] || expected_scrolls=2
+  [[ $mode != scroll-label-only && $mode != scroll-reverse ]] || expected_scrolls=3
+  [[ $auto_code == 1 && ! -e $out/2026-09-28.paste-skipped && ! -e $out/2026-09-28.paste-attention && $(grep -c '^orca computer scroll ' "$CALLS") == "$expected_scrolls" ]] || fail "Unidentified channel or stationary screen became terminal: $mode"
+  ! grep -Eq '^orca computer (click|hotkey|press-key|set-value)' "$CALLS" || fail "Unidentified/stationary screen clicked or typed: $mode"
+  captures=("$capture_dir"/*.txt)
+  [[ ${#captures[@]} == 1 && -f ${captures[0]} ]] || fail "Unidentified/stationary screen lacks diagnostic: $mode"
+  if [[ $mode == scroll-stalled || $mode == scroll-label-only || $mode == scroll-reverse ]]; then
+    grep -Fq 'unchanged=2 moved=0' "${captures[0]}" || fail 'Stationary screen was not distinguished from progress then bottom'
+  else
+    grep -Fq 'channel scroll 0: configured_channel=false' "${captures[0]}" || fail 'Wrong-channel diagnostic lacks configured-channel check'
+  fi
+  ! grep -Eq 'scroll-secret|비밀본문|daily-scrum|other-channel|CEXAMPLE|COTHER|example.slack.com' "${captures[0]}" || fail "Channel diagnostic leaked content: $mode"
+done
+auto_reset
+AUTO_CLOCK=0907 AUTO_SELF_RESET=1 AUTO_INPUT_AT=4 PASTE_MODE=scroll-delayed run_auto
+[[ $auto_code == 4 && $(grep -c '^orca computer scroll ' "$CALLS") == 1 && ! -e $out/2026-09-28.paste-skipped && ! -e $out/2026-09-28.pasted && $(cat "$out/2026-09-28.paste-attempts") == 0 ]] || fail 'User input during scrolling did not defer before the next scroll'
+jq -Rse 'split("\n") as $calls | ($calls|index("input-at 4")) as $input | $input!=null and all($calls[$input+1:][];test("^open |^orca computer (scroll|click|hotkey|set-value|press-key)")|not)' "$CALLS" >/dev/null || fail 'GUI mutation ran after scroll input guard'
+[[ $(cat "$CLIPBOARD") == 'original clipboard' && $(cat "$FOREGROUND") == com.tinyspeck.slackmacgap ]] || fail 'Scroll interruption stole focus or clipboard'
+auto_reset
+AUTO_CLOCK=0907 run_auto
+[[ $auto_code == 0 && -f $out/2026-09-28.pasted && $(grep -c '^orca computer scroll ' "$CALLS") == 0 ]] || fail 'Already visible today post was scrolled'
+auto_reset
+AUTO_CLOCK=0907 PASTE_MODE=shared-permalink run_auto
+[[ $auto_code == 0 && -f $out/2026-09-28.pasted && $(grep -c '^orca computer scroll ' "$CALLS") == 0 ]] || fail 'Shared foreign permalink prevented valid today-channel navigation'
+grep -q 'click .*--element-index 61 ' "$CALLS" || fail 'Shared foreign permalink changed the today reply target'
+! grep -q 'click .*--element-index 93 ' "$CALLS" || fail 'Shared foreign permalink was clicked'
+# A forwarded attachment can render another channel's link with a timestamp-style label.
+auto_reset
+AUTO_CLOCK=0907 PASTE_MODE=forwarded-timestamp run_auto
+[[ $auto_code == 0 && -f $out/2026-09-28.pasted && $(grep -c '^orca computer scroll ' "$CALLS") == 0 ]] || fail 'Forwarded timestamp link from another channel blocked valid navigation'
+! grep -q 'click .*--element-index 93 ' "$CALLS" || fail 'Forwarded foreign timestamp link was clicked'
 for mode in duplicate nonempty; do
   auto_reset
   PASTE_MODE=$mode run_auto
@@ -1039,6 +1137,7 @@ touch "$out/2026-09-28.pasted" "$out/2026-09-28.paste-attention"
 : > "$CALLS"
 MORNING_PASTE_EXIT=3 bash "$morning_copy/morning" > "$sandbox/morning-attention"
 { grep -q 'scrum-paste:확인 필요(' "$sandbox/morning-attention" && grep -q '^notification .*붙여넣었을 수 있음.*전송 금지' "$CALLS"; } || fail 'Morning attention does not beat completion marker or retain possible-paste warning'
+! grep -q '^notification .*모든 단계 완료' "$CALLS" || fail 'Morning attention result claimed completion without an AWS notice'
 ! grep -q '^notification .*붙여넣기 대기' "$CALLS" || fail 'Morning attention was called pending'
 rm "$out/2026-09-28.paste-attention"
 : > "$CALLS"
@@ -1084,5 +1183,12 @@ require_gh_stub; require_omp_stub
 ROUTINE_ALLOW_GUI=1 "$repo/bin/morning" --only scrum-collect --only scrum-draft > "$sandbox/morning"
 grep -q 'scrum-collect:ok' "$sandbox/morning" || fail 'Morning collection stage missing'
 grep -q 'scrum-draft:ok' "$sandbox/morning" || fail 'Morning draft stage missing'
-! grep -q 'orca\|open ' "$CALLS" || fail 'Morning invoked GUI'
+no_gui_pattern='^(orca |open )'
+for root in /fixture/Documents/GitHub/routine-automation /fixture/orca/workspaces/routine-automation/scrum-channel-scroll; do
+  ! printf 'omp --config %s/share/scrum-omp.yml\n' "$root" | grep -Eq "$no_gui_pattern" || fail 'Repository path was mistaken for GUI execution'
+done
+for call in 'orca computer scroll --direction down' 'orca computer get-app-state' 'open slack://channel'; do
+  printf '%s\n' "$call" | grep -Eq "$no_gui_pattern" || fail 'Morning GUI assertion missed an actual command'
+done
+! grep -Eq "$no_gui_pattern" "$CALLS" || fail 'Morning invoked GUI'
 echo 'PASS: isolated scrum draft, evidence, Slack search and safe paste behavior'
