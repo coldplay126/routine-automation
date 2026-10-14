@@ -3,8 +3,9 @@
 # $2 (optional): the Orca state file that failed to parse. Its accessibility *structure* is kept for
 # diagnosis with text, values, names and organisation identifiers masked (share/slack.jq structure_dump).
 # $3 (optional): a step trace (one line per poll; no screen text) appended to the capture.
+# $4 (optional): a non-layout diagnostic heading; defaults to the format-change warning.
 slack_format_notice() {
-  local message="Slack/Orca 화면 형식 변경 의심 — $1" state=${2:-} trace=${3:-} dir stamp old captures
+  local message="${4:-Slack/Orca 화면 형식 변경 의심} — $1" state=${2:-} trace=${3:-} dir stamp old captures
   printf '%s\n' "$message" >&2
   failure_reason=$message
   if [[ -n $state && -r $state ]]; then

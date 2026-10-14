@@ -68,16 +68,23 @@ fi
 echo com.tinyspeck.slackmacgap > "$FOREGROUND"
 if [[ ${AUTO_SELF_RESET:-0} == 1 ]]; then perl -MTime::HiRes=time -e 'printf "%.0f\n", time*1000' > "$HID_RESET_EPOCH"; fi
 [[ ${PASTE_MODE:-} != signal-open ]] || kill -TERM "$PPID"
-if [[ ${1-} == -a ]]; then echo search > "$STAGE"; else echo channel > "$STAGE"; fi
-rm -f -- "$STAGE.polls" "$STAGE.pasted" "$STAGE.reply.polls" "$STAGE.scrolls" "$STAGE.scroll-settled"
-if [[ ${1-} == -a ]]; then rm -f -- "$STAGE".*.polls "$STAGE.cleared"; fi
+if [[ ${1-} == *'&message='* ]]; then
+  message=${1##*&message=}
+  [[ $message =~ ^[0-9]{10}\.[0-9]{6}$ ]] || exit 87
+  [[ $1 == "slack://channel?team=TEXAMPLE&id=CEXAMPLE&message=$message" ]] || exit 87
+  [[ ${PASTE_MODE:-} != jump-open-fail ]] || exit 89
+  printf '%s\n' "$message" > "$STAGE.message"
+  jumps=$(cat "$STAGE.jumps" 2>/dev/null || echo 0); echo "$((jumps+1))" > "$STAGE.jumps"
+  echo channel > "$STAGE"
+else
+  if [[ ${1-} == -a ]]; then echo search > "$STAGE"; else echo channel > "$STAGE"; fi
+  rm -f -- "$STAGE.polls" "$STAGE.pasted" "$STAGE.reply.polls" "$STAGE.jumps" "$STAGE.message" "$STAGE.render-polls"
+  if [[ ${1-} == -a ]]; then rm -f -- "$STAGE".*.polls "$STAGE.cleared"; fi
+fi
 OPEN
 cat > "$HOME/.local/bin/sleep" <<'SLEEP'
 #!/usr/bin/env bash
-if [[ ${1:-} == 1.5 ]]; then
-  printf 'channel-settle 1.5\n' >> "$CALLS"
-  if [[ ${PASTE_MODE:-} == scroll-settling ]]; then touch "$STAGE.scroll-settled"; fi
-fi
+if [[ ${1:-} == 3 ]]; then printf 'channel-wait 3\n' >> "$CALLS"; fi
 exit 0
 SLEEP
 cat > "$HOME/.local/bin/pbpaste" <<'PASTE'
@@ -143,10 +150,6 @@ case $2 in
     [[ ${PASTE_MODE:-} != child-three ]] || exit 3
     [[ $stage == focused ]] || exit 88
     [[ " $* " != *' Cmd+V '* ]] || touch "$STAGE.pasted" ;;
-  scroll)
-    [[ $stage == channel && " $* " == *' --element-index 20 '* && " $* " == *' --direction down '* && " $* " == *' --pages 1 '* ]] || exit 87
-    scrolls=$(cat "$STAGE.scrolls" 2>/dev/null || echo 0); echo "$((scrolls+1))" > "$STAGE.scrolls"
-    printf '{"ok":true,"result":{"success":true,"text":"scroll-secret 비밀본문"}}\n' ;;
   get-app-state)
     focus=null
     case $stage in
@@ -252,28 +255,65 @@ case $2 in
           if [[ -f $STAGE.searched ]]; then tree=${tree/$'\n[31]'/$'\n[61]'}; fi
           if [[ ${PASTE_MODE:-} == multi ]]; then tree+=$'\n[50] container, Text: 스크럼-예제팀: 예제팀\n[51] link [오늘, 오전 8:02:01](https://example.slack.com/archives/CEXAMPLE/p1790895609247050)\n[52] 버튼 5개의 댓글'; fi
         fi
-        if [[ ${PASTE_MODE:-} == shared-permalink ]]; then tree+=$'\n[93] link [공유된 다른 채널의 글](https://example.slack.com/archives/COTHER/p1790895608539999)'; fi
-        if [[ ${PASTE_MODE:-} == forwarded-timestamp ]]; then tree+=$'\n[93] link [9월 27일, 오전 9:00:00](https://example.slack.com/archives/COTHER/p1790895608539999)'; fi
         tree+=$'\n[39] container, Text: 공지\n[53] link [오늘, 오전 9:00:01](https://example.slack.com/archives/CEXAMPLE/p1790895609540000)\n[52] 버튼 5개의 댓글'
         if [[ ${PASTE_MODE:-} == toolbar-index-drift && $polls -ge 2 ]]; then tree+=$'\n[33] 버튼 스레드의 댓글'; fi
-        scrolls=$(cat "$STAGE.scrolls" 2>/dev/null || echo 0)
-        if [[ ${PASTE_MODE:-} == old ]]; then
-          notice_url=1790895609540000; ((scrolls==0)) || notice_url=$((notice_url+1))
-          tree=${tree/p1790895609540000/p$notice_url}
-        fi
-        if [[ ${PASTE_MODE:-} == scroll-* && ${PASTE_MODE:-} != scroll-wrong-today && ${PASTE_MODE:-} != scroll-conflicting-today && ( ${PASTE_MODE:-} != scroll-reopen || -f $STAGE.searched ) && ( ${PASTE_MODE:-} != scroll-settling || ! -f $STAGE.scroll-settled ) ]]; then
-          if [[ ${PASTE_MODE:-} == scroll-bottom || ${PASTE_MODE:-} == scroll-moving || ${PASTE_MODE:-} == scroll-stalled || ${PASTE_MODE:-} == scroll-label-only || ${PASTE_MODE:-} == scroll-reverse || ${PASTE_MODE:-} == scroll-settling || $scrolls -lt 2 ]]; then
-            scroll_day='10월 7일'; [[ $scrolls == 0 || ${PASTE_MODE:-} == scroll-stalled ]] || scroll_day='10월 9일'
-            scroll_url=1790895608539999
-            if [[ ${PASTE_MODE:-} == scroll-moving ]]; then scroll_url=$((scroll_url+scrolls))
-            elif [[ ${PASTE_MODE:-} == scroll-reverse ]]; then ((scrolls==0)) || scroll_url=$((scroll_url-1))
-            elif [[ ${PASTE_MODE:-} != scroll-stalled && ${PASTE_MODE:-} != scroll-label-only && $scrolls -gt 0 ]]; then scroll_url=$((scroll_url+1)); fi
-            tree=$'[90] container, Text: 스크럼-예제팀: 예제팀 token=scroll-secret 비밀본문\n[91] link ['"$scroll_day"$', 오전 8:00:01](https://example.slack.com/archives/CEXAMPLE/p'"$scroll_url"$')\n[92] 버튼 2개의 댓글'
+        message=$(cat "$STAGE.message" 2>/dev/null || true)
+        if [[ ${PASTE_MODE:-} == jump-* && ${PASTE_MODE:-} != jump-wrong-today && ${PASTE_MODE:-} != jump-conflicting-today && ( ${PASTE_MODE:-} != jump-reopen || -f $STAGE.searched ) ]]; then
+          jump_day='10월 7일'; jump_p=1790895608539999; loading=0; old_position=1
+          case ${PASTE_MODE:-} in
+            jump-1014|jump-1014-stalled) old_position=0 ;;
+            jump-delayed|jump-reopen|jump-renamed-channel)
+              if [[ $message == 1790895609.247049 || $message == 1790895609.000001 || ( ${PASTE_MODE:-} != jump-reopen && -f $STAGE.searched ) ]]; then old_position=0
+              elif [[ $message == 1790895608.539999 ]]; then jump_day='10월 9일'; jump_p=1790895609000001; fi ;;
+            jump-moving) [[ -z $message ]] || jump_p=$((${message/./}+1)) ;;
+            jump-reverse) [[ -z $message ]] || jump_p=$((${message/./}-1)) ;;
+            jump-label-only) jump_day='오늘'; jump_p=1791936001000001 ;;
+            jump-bottom|jump-loading-body|jump-forwarded-only|jump-placeholder-before|jump-loading-child) jump_day='오늘'; jump_p=1791936001000001 ;;
+            jump-loading|jump-open-fail) loading=1 ;;
+            jump-empty-ready)
+              polls=$(cat "$STAGE.render-polls" 2>/dev/null || echo 0); polls=$((polls+1)); echo "$polls" > "$STAGE.render-polls"
+              [[ $polls -lt 2 ]] || old_position=0 ;;
+            jump-forwarded-majority|jump-yesterday|jump-no-links|jump-malformed|jump-wrong-*|jump-conflicting-*) ;;
+          esac
+          if [[ $old_position == 1 && ${PASTE_MODE:-} != jump-1014 && ${PASTE_MODE:-} != jump-1014-stalled ]]; then
+            jump_time='오전 8:00:01'
+            if [[ $jump_day == 오늘 ]]; then jump_time='오전 9:00:01'; fi
+            if [[ ${PASTE_MODE:-} == jump-label-only && -n $message ]]; then jump_time='오전 9:00:02'; fi
+            tree=$'[90] container, Text: 스크럼-예제팀: 예제팀 token=jump-secret 비밀본문\n[91] link ['"$jump_day, $jump_time"$'](https://example.slack.com/archives/CEXAMPLE/p'"$jump_p"$')\n[92] 버튼 2개의 댓글'
+            [[ ${PASTE_MODE:-} != jump-loading-body ]] || tree+=$'\n[99] 텍스트, Value: 페이지 로드 중 오류를 수정했습니다.'
+            [[ $loading == 0 ]] || tree+=$'\n[98] container 스크럼-예제팀: 로드 중...'
+            [[ ${PASTE_MODE:-} != jump-placeholder-before ]] || tree=$'[88] container 날짜 구분\n[89] 팝업 버튼 오늘\n[98] container 로드 중...\n'"$tree"
+            [[ ${PASTE_MODE:-} != jump-loading-child ]] || tree+=$'\n[98] container\n[99] 텍스트, Value: 로드 중...'
+            [[ ${PASTE_MODE:-} != jump-malformed ]] || tree+=$'\n[98] container 다른 오늘 원글\n[99] link [오늘, 오전 9:00:01](https://example.slack.com/archives/CEXAMPLE/p17919360010000010)'
+            if [[ ${PASTE_MODE:-} == jump-no-links || ${PASTE_MODE:-} == jump-empty-ready ]]; then tree=$'[90] container 스크럼-예제팀: 로드 중...'; fi
           fi
         fi
-        tree=$(jq -nr --arg tree "$tree" '"[20] 내용 목록 daily-scrum (채널)\n"+($tree|split("\n")|map("\t"+.)|join("\n"))')
-        if [[ ${PASTE_MODE:-} == scroll-wrong-* || ${PASTE_MODE:-} == scroll-renamed-channel ]]; then tree=${tree/daily-scrum/other-channel}; fi
-        if [[ ${PASTE_MODE:-} == scroll-wrong-* || ${PASTE_MODE:-} == scroll-conflicting-* ]]; then tree=${tree//CEXAMPLE/COTHER}; fi
+        # Use the actual AX hierarchy: list -> message -> header -> original time.
+        # Workflow fixtures already have a header; older flat fixtures are normalized here.
+        tree=$(jq -nr --arg tree "$tree" '
+          if ($tree|contains("\t")) then "[20] 내용 목록 daily-scrum (채널)\n"+($tree|split("\n")|map("\t"+.)|join("\n"))
+          else "[20] 내용 목록 daily-scrum (채널)\n"+($tree|split("\n")|map(
+            if test("^\\[[0-9]+\\] container") then
+              "\t"+.+"\n\t\t["+(capture("^\\[(?<index>[0-9]+)\\]").index|tonumber|.+1000|tostring)+"] container"
+            else "\t\t\t"+. end)|join("\n")) end')
+        # Actual 10/14 diagnostic main-list subtree: twelve originals, no loading placeholder.
+        if [[ ${PASTE_MODE:-} == jump-1014-stalled || ( ${PASTE_MODE:-} == jump-1014 && $message != 1791932406.995949 && ! -f $STAGE.searched ) ]]; then
+          tree=$(cat "$FIXTURES/slack-channel-1014.txt")
+        fi
+        if [[ ${PASTE_MODE:-} == shared-permalink || ${PASTE_MODE:-} == forwarded-timestamp ]]; then
+          label='공유된 다른 채널의 글'; [[ ${PASTE_MODE:-} != forwarded-timestamp ]] || label='9월 27일, 오전 9:00:00'
+          attachment=$'\n\t\t\t[94] container 전달된 글\n\t\t\t\t[93] link ['"$label"$'](https://example.slack.com/archives/COTHER/p1791999999999999)'
+          tree=${tree/$'\n\t[39]'/$attachment$'\n\t[39]'}
+        fi
+        if [[ ${PASTE_MODE:-} == jump-forwarded-majority ]]; then
+          tree=${tree//CEXAMPLE/COTHER}
+          tree+=$'\n\t\t\t[94] container 전달된 글\n\t\t\t\t[95] link [오늘, 오전 8:00:06](https://example.slack.com/archives/CEXAMPLE/p1791999999999998)\n\t\t\t\t[96] link [오늘, 오전 8:00:07](https://example.slack.com/archives/CEXAMPLE/p1791999999999999)'
+        fi
+        if [[ ${PASTE_MODE:-} == jump-forwarded-only ]]; then
+          tree+=$'\n\t\t\t[94] container 전달된 글\n\t\t\t\t[95] link [오늘, 오전 8:00:06](https://example.slack.com/archives/COTHER/p1791999999999999)'
+        fi
+        if [[ ${PASTE_MODE:-} == jump-wrong-* || ${PASTE_MODE:-} == jump-renamed-channel ]]; then tree=${tree/daily-scrum/other-channel}; fi
+        if [[ ${PASTE_MODE:-} == jump-wrong-* || ${PASTE_MODE:-} == jump-conflicting-* ]]; then tree=${tree//CEXAMPLE/COTHER}; fi
         if [[ ${PASTE_MODE:-} == toolbar-private ]]; then tree=${tree/\(채널\)/(채널, 비공개)}; fi
         if [[ ${PASTE_MODE:-} == toolbar-private-prefix ]]; then tree=${tree/\(채널\)/(비공개 채널)}; fi
         if [[ ${PASTE_MODE:-} == toolbar-split ]]; then
@@ -309,6 +349,7 @@ case $2 in
         [[ $stage != focused ]] || focus=44 ;;
       *) exit 87 ;;
     esac
+    if [[ ${PASTE_MODE:-} == jump-1014 ]]; then tree=${tree//1790895609247049/1791932407000000}; fi
     if [[ ${PASTE_MODE:-} == query-special ]]; then tree=${tree//daily-scrum/$ROUTINE_SLACK_CHANNEL_NAME}; fi
     if [[ " $* " != *' --no-screenshot '* ]]; then
       [[ ${PASTE_MODE:-} != screenshot-fail ]] || exit 90
@@ -317,7 +358,7 @@ case $2 in
   *) exit 87 ;;
 esac
 case $action in
-  click|set-value|press-key|hotkey|scroll)
+  click|set-value|press-key|hotkey)
     if [[ ${AUTO_SELF_RESET:-0} == 1 ]]; then perl -MTime::HiRes=time -e 'printf "%.0f\n", time*1000' > "$HID_RESET_EPOCH"; fi ;;
 esac
 ORCA
@@ -349,6 +390,38 @@ require_gui_stubs() {
   for cmd in orca open osascript pbcopy pbpaste; do [[ $(type -P "$cmd") == "$HOME/.local/bin/$cmd" ]] || fail "Refusing real $cmd"; done
 }
 require_gh_stub; require_omp_stub; require_gui_stubs
+# Forwarded links may precede the original in AX order. Only the first direct
+# header timestamp counts, even when deeper configured-channel links outnumber it.
+original_time_tree=$'[20] 내용 목록 daily-scrum (채널)\n\t[30] container 메시지\n\t\t[31] container\n\t\t\t[32] container 전달된 글\n\t\t\t\t[33] link [오늘, 오전 8:00:06](https://example.slack.com/archives/CEXAMPLE/p1791999999999998)\n\t\t\t\t[34] link [오늘, 오전 8:00:07](https://example.slack.com/archives/CEXAMPLE/p1791999999999999)\n\t\t\t[35] link [어제, 오전 8:00:01](https://example.slack.com/archives/COTHER/p1790895608539999)'
+jq -L "$repo/share" -ne --arg tree "$original_time_tree" --argjson routine '{"slack":{"channel_name":"daily-scrum","channel_id":"CEXAMPLE"}}' '
+  include "slack"; $tree | (channel_original_timestamps|map(.index))==[35] and (channel_list_identified|not)' >/dev/null ||
+  fail 'Deeper configured forwarded timestamps overruled the foreign original'
+original_time_tree=${original_time_tree//CEXAMPLE/CFOREIGN}
+original_time_tree=${original_time_tree//COTHER/CEXAMPLE}
+jq -L "$repo/share" -ne --arg tree "$original_time_tree" --argjson routine '{"slack":{"channel_name":"daily-scrum","channel_id":"CEXAMPLE"}}' '
+  include "slack"; $tree | channel_list_identified and
+    (channel_message_position | .last.p=="1790895608539999" and .last.ts=="1790895608.539999" and .loading_present==false and .today_covered==false)' >/dev/null ||
+  fail 'Earlier deep forwarded timestamps were used as the original or maximum'
+original_time_tree=${original_time_tree/$'\n\t\t[31]'/$'\n\t\t[98] container 저장됨\n\t\t\t[99] 텍스트, Value: 배너\n\t\t[31]'}
+jq -L "$repo/share" -ne --arg tree "$original_time_tree" --argjson routine '{"slack":{"channel_name":"daily-scrum","channel_id":"CEXAMPLE"}}' '
+  include "slack"; $tree|channel_original_timestamps|map(.index)==[35]' >/dev/null ||
+  fail 'A banner before the timestamp-bearing header hid the original'
+jq -L "$repo/share" -ne --argjson routine '{"slack":{"post_time_prefix":"오전 8:0"}}' '
+  include "slack"; (channel_today_covered({label:"오늘, 오전 8:09:59"})|not) and
+    channel_today_covered({label:"오늘, 오전 8:10:00"}) and
+    (channel_today_covered({label:"어제, 오전 9:00:00"})|not)' >/dev/null ||
+  fail 'Today coverage did not wait until after the full configured posting prefix'
+rendered_loading_tree=${original_time_tree/어제, 오전 8:00:01/오늘, 오전 9:00:01}
+rendered_loading_tree=${rendered_loading_tree/1790895608539999/1791936001000001}
+rendered_loading_tree+=$'\n\t\t\t[36] 텍스트, Value: 페이지 로드 중 오류를 수정했습니다.'
+jq -L "$repo/share" -ne --arg tree "$rendered_loading_tree" --argjson routine '{"slack":{"channel_name":"daily-scrum","channel_id":"CEXAMPLE"}}' '
+  include "slack"; $tree|channel_message_position|.loading_present==false and .today_covered==true' >/dev/null ||
+  fail 'Rendered original message body was mistaken for a loading placeholder'
+rendered_loading_tree+=$'\n\t[40] container\n\t\t[41] 텍스트, Value: 로드 중...'
+jq -L "$repo/share" -ne --arg tree "$rendered_loading_tree" --argjson routine '{"slack":{"channel_name":"daily-scrum","channel_id":"CEXAMPLE"}}' '
+  include "slack"; $tree|channel_message_position|.loading_present==true' >/dev/null ||
+  fail 'A timestamp-less loading placeholder was ignored beside a rendered message'
+printf 'PASS: 원글 헤더 첫 시각만 신원·최대 p로 사용, 깊은 전달 링크 다수결 제외\n'
 # Run production JXA against a private named board, never the general clipboard.
 board_name="routine-test-$$-$RANDOM"
 export ROUTINE_PASTEBOARD_NAME="$board_name"
@@ -803,76 +876,103 @@ for clock in 0810 1130; do
   grep -q '^-k 30 900 /bin/bash .*scrum-paste --auto$' "$TIMEOUT_CALLS" || fail 'Complete auto execution lacks 900-second timeout'
   : > "$CALLS"; run_auto; no_auto_gui completed
 done
-# Old channel positions must be scrolled, both on the first open and after duplicate search.
-for mode in scroll-delayed scroll-reopen scroll-renamed-channel scroll-settling; do
+# Message links, not successful-but-ineffective Orca scrolls, advance the rendered channel.
+for mode in jump-1014 jump-delayed jump-reopen jump-renamed-channel; do
   auto_reset
   AUTO_CLOCK=0907 AUTO_SELF_RESET=1 PASTE_MODE=$mode run_auto
-  expected_scrolls=4; [[ $mode != scroll-reopen ]] || expected_scrolls=2
-  [[ $mode != scroll-settling ]] || expected_scrolls=6
-  if [[ $mode == scroll-settling ]]; then
-    [[ $(grep -c '^channel-settle 1.5$' "$CALLS") == 2 && ! -e $out/2026-09-28.paste-skipped ]] || fail 'Settling recheck did not recover today instead of missing-post terminal'
+  expected_jumps=3
+  if [[ $mode == jump-1014 ]]; then expected_jumps=2
+  elif [[ $mode == jump-reopen ]]; then expected_jumps=1; fi
+  [[ $auto_code == 0 && -f $out/2026-09-28.pasted && $(grep -c '^open slack://.*&message=' "$CALLS") == "$expected_jumps" ]] || fail "Message jump did not find today's post: $mode"
+  ! grep -q '^orca computer scroll ' "$CALLS" || fail 'Message jump called Orca scroll'
+  root_ts=1790895609.247049; [[ $mode != jump-1014 ]] || root_ts=1791932407.000000
+  grep -Fxq "open slack://channel?team=TEXAMPLE&id=CEXAMPLE&message=$root_ts" "$CALLS" || fail 'Search reopen did not jump directly to the expected root'
+  if [[ $mode == jump-1014 ]]; then
+    grep -Fxq 'open slack://channel?team=TEXAMPLE&id=CEXAMPLE&message=1791932406.995949' "$CALLS" || fail '10/14 actual maximum p was not converted to its exact timestamp'
+  elif [[ $mode != jump-reopen ]]; then
+    grep -Fxq 'open slack://channel?team=TEXAMPLE&id=CEXAMPLE&message=1790895608.539999' "$CALLS" || fail '10/12 first jump timestamp was incorrect'
+    grep -Fxq 'open slack://channel?team=TEXAMPLE&id=CEXAMPLE&message=1790895609.000001' "$CALLS" || fail '10/12 second jump did not advance to the new maximum'
   fi
-  [[ $auto_code == 0 && -f $out/2026-09-28.pasted && $(grep -c '^orca computer scroll ' "$CALLS") == "$expected_scrolls" ]] || fail "Old channel position did not find today's post: $mode"
-  jq -Rse 'split("\n") | map(select(test("^orca computer scroll "))) | length>0 and all(.[];contains("--element-index 20 --direction down --pages 1 --no-screenshot --json"))' "$CALLS" >/dev/null || fail 'Scroll borrowed a thread or another channel list'
-  grep -q 'click .*--element-index 61 ' "$CALLS" || fail 'Scroll did not use the freshly identified today reply'
+  jq -Rse 'split("\n") as $calls | [range(0;$calls|length)|select($calls[.]|test("^open slack://.*&message="))] |
+    length>0 and all(.[]; . as $i | $calls[$i+1]=="channel-wait 3" and ($calls[$i+2]|startswith("orca computer get-app-state ")))' "$CALLS" >/dev/null || fail 'Message jump did not wait three seconds and re-read the tree'
+  grep -q 'click .*--element-index 61 ' "$CALLS" || fail 'Jump did not use the freshly identified today reply'
   ! grep -Eq 'press-key|--element-index (90|91|92)' "$CALLS" || fail 'Old channel post was clicked or Return was sent'
-  [[ $(cat "$CLIPBOARD") == 'original clipboard' && $(cat "$FOREGROUND") == com.apple.Terminal ]] || fail 'Scroll recovery lost clipboard/foreground'
+  [[ $(cat "$CLIPBOARD") == 'original clipboard' && $(cat "$FOREGROUND") == com.apple.Terminal ]] || fail 'Jump recovery lost clipboard/foreground'
 done
+for mode in jump-bottom jump-label-only jump-forwarded-only jump-loading-body; do
+  auto_reset
+  AUTO_CLOCK=0907 PASTE_MODE=$mode run_auto
+  [[ $auto_code == 3 && -f $out/2026-09-28.paste-skipped && $(grep -c '^open slack://.*&message=' "$CALLS") == 2 ]] || fail "Two stationary jumps with today's later original were not terminal after 09:00: $mode"
+  grep -Fq 'reason=오늘 스크럼 글 없음' "$out/2026-09-28.paste-skipped" || fail 'Bottom terminal lacks exact no-post reason'
+  grep -Fxq 'open slack://channel?team=TEXAMPLE&id=CEXAMPLE&message=1791936001.000001' "$CALLS" || fail 'Forwarded timestamp was used as a jump target'
+  [[ $(grep -c '^channel-wait 3$' "$CALLS") == 4 ]] || fail 'Bottom confirmation omitted the extra wait and re-read'
+  ! grep -Eq '^orca computer (scroll|click|hotkey|press-key|set-value)' "$CALLS" || fail 'No-post jump clicked or typed'
+done
+grep -Fq 'channel jump 2: state=성공 today=0 last_date=오늘, 오전 9:00:01 progress=0 stationary=2 loading_present=false today_covered=true' "$auto_log" || fail 'Terminal no-post log lacks repeated stationary maximum and today evidence'
+grep -Fq 'channel jump 2: command_exit=0 wait=3s' "$auto_log" || fail 'Terminal no-post log lacks safe jump command result'
+grep -Fq 'channel jump 2: bottom_wait=3s' "$auto_log" || fail 'Terminal no-post lacks extra bottom wait'
+grep -Fq 'channel jump 2: bottom_confirmed=true' "$auto_log" || fail 'Terminal no-post lacks delayed bottom confirmation'
 auto_reset
-AUTO_CLOCK=0907 PASTE_MODE=scroll-bottom run_auto
-[[ $auto_code == 3 && -f $out/2026-09-28.paste-skipped && $(grep -c '^orca computer scroll ' "$CALLS") == 3 ]] || fail 'Confirmed bottom without today was not terminal after 09:00'
-grep -Fq 'reason=오늘 스크럼 글 없음' "$out/2026-09-28.paste-skipped" || fail 'Bottom terminal lacks exact no-post reason'
-! grep -Eq '^orca computer (click|hotkey|press-key|set-value)' "$CALLS" || fail 'No-post scrolling clicked or typed'
-grep -Fq 'channel scroll 3: state=성공 today=0 last_date=10월 9일, 오전 8:00:01 unchanged=2 moved=1' "$auto_log" || fail 'Terminal no-post log lacks confirmed bottom evidence'
-grep -Fq 'channel scroll 3: command_exit=0 result={"json_valid":true,"ok":true,"result_success":true,"error_present":false}' "$auto_log" || fail 'Terminal no-post log lacks safe scroll command result'
-grep -Fq 'channel scroll 3: bottom_recheck=성공' "$auto_log" || fail 'Terminal no-post lacks delayed bottom recheck'
-jq -Rse 'split("\n") as $calls | ($calls|index("channel-settle 1.5")) as $wait |
-  $wait!=null and ($calls[$wait+1]|startswith("orca computer get-app-state "))' "$CALLS" >/dev/null || fail 'Bottom wait was not followed by fresh app state'
-auto_reset
+AUTO_CLOCK=0859 PASTE_MODE=jump-bottom run_auto
+[[ $auto_code == 1 && ! -e $out/2026-09-28.paste-skipped ]] || fail 'Confirmed no-post bottom became terminal before 09:00'
 capture_dir="$HOME/Library/Logs/routine-automation/slack-format"
-rm -rf -- "$capture_dir"
-AUTO_CLOCK=0907 PASTE_MODE=scroll-moving run_auto
-[[ $auto_code == 1 && ! -e $out/2026-09-28.paste-skipped && ! -e $out/2026-09-28.paste-attention && $(grep -c '^orca computer scroll ' "$CALLS") == 8 ]] || fail 'Unconfirmed channel bottom was terminal or exceeded scroll bound'
-captures=("$capture_dir"/*.txt)
-[[ ${#captures[@]} == 1 && -f ${captures[0]} && $(stat -f %Lp "${captures[0]}") == 600 && $(stat -f %Lp "$capture_dir") == 700 ]] || fail 'Scroll bound lacks private diagnostic'
-grep -Fq 'channel scroll 8: state=성공 today=0 last_date=10월 9일, 오전 8:00:01 unchanged=0' "${captures[0]}" || fail 'Scroll diagnostic lacks count/date/progress summary'
-! grep -Eq 'scroll-secret|비밀본문|daily-scrum|CEXAMPLE|example.slack.com' "${captures[0]}" || fail 'Scroll diagnostic leaked screen content or identifiers'
-grep -Fq 'channel scroll 8: command_exit=0 result={"json_valid":true,"ok":true,"result_success":true,"error_present":false}' "${captures[0]}" || fail 'Scroll diagnostic omitted command result'
-for mode in scroll-wrong-channel scroll-wrong-today scroll-conflicting-id scroll-conflicting-today scroll-stalled scroll-label-only scroll-reverse; do
+for mode in jump-moving jump-loading jump-loading-child jump-placeholder-before jump-yesterday jump-1014-stalled; do
   auto_reset
   rm -rf -- "$capture_dir"
   AUTO_CLOCK=0907 PASTE_MODE=$mode run_auto
-  expected_scrolls=0; [[ $mode != scroll-stalled ]] || expected_scrolls=2
-  [[ $mode != scroll-label-only && $mode != scroll-reverse ]] || expected_scrolls=3
-  [[ $auto_code == 1 && ! -e $out/2026-09-28.paste-skipped && ! -e $out/2026-09-28.paste-attention && $(grep -c '^orca computer scroll ' "$CALLS") == "$expected_scrolls" ]] || fail "Unidentified channel or stationary screen became terminal: $mode"
-  ! grep -Eq '^orca computer (click|hotkey|press-key|set-value)' "$CALLS" || fail "Unidentified/stationary screen clicked or typed: $mode"
+  [[ $auto_code == 1 && ! -e $out/2026-09-28.paste-skipped && ! -e $out/2026-09-28.paste-attention && $(grep -c '^open slack://.*&message=' "$CALLS") == 6 ]] || fail "Unconfirmed bottom was terminal or exceeded jump bound: $mode"
   captures=("$capture_dir"/*.txt)
-  [[ ${#captures[@]} == 1 && -f ${captures[0]} ]] || fail "Unidentified/stationary screen lacks diagnostic: $mode"
-  if [[ $mode == scroll-stalled || $mode == scroll-label-only || $mode == scroll-reverse ]]; then
-    grep -Fq 'unchanged=2 moved=0' "${captures[0]}" || fail 'Stationary screen was not distinguished from progress then bottom'
-  else
-    grep -Fq 'channel scroll 0: configured_channel=false' "${captures[0]}" || fail 'Wrong-channel diagnostic lacks configured-channel check'
-  fi
-  ! grep -Eq 'scroll-secret|비밀본문|daily-scrum|other-channel|CEXAMPLE|COTHER|example.slack.com' "${captures[0]}" || fail "Channel diagnostic leaked content: $mode"
+  [[ ${#captures[@]} == 1 && -f ${captures[0]} && $(stat -f %Lp "${captures[0]}") == 600 && $(stat -f %Lp "$capture_dir") == 700 ]] || fail 'Jump bound lacks private diagnostic'
+  case $mode in
+    jump-loading|jump-loading-child|jump-placeholder-before)
+      grep -Fq 'loading_present=true' "${captures[0]}" || fail 'A loading placeholder in the message subtree or before the maximum was not reported' ;;
+    jump-moving) grep -Fq 'progress=1' "${captures[0]}" || fail 'Increasing maximum was not reported' ;;
+    jump-yesterday|jump-1014-stalled)
+      grep -Fq 'stationary=2 loading_present=false today_covered=false' "${captures[0]}" || fail 'Unrendered today range became confirmed bottom'
+      grep -Fq '채널/오늘 글 범위 미확인' "${captures[0]}" || fail 'Missing today range used a format-change diagnostic'
+      grep -Fq 'Slack 오늘 글 범위 미확인' "$auto_log" || fail 'Missing today range lacks a distinct failure heading' ;;
+  esac
+  grep -Fq 'channel jump 6: command_exit=0 wait=3s' "${captures[0]}" || fail 'Jump diagnostic omitted bounded command result'
+  ! grep -Eq 'jump-secret|비밀본문|daily-scrum|CEXAMPLE|example.slack.com' "${captures[0]}" || fail 'Jump diagnostic leaked screen content or identifiers'
+done
+for mode in jump-wrong-channel jump-wrong-today jump-conflicting-id jump-conflicting-today jump-forwarded-majority jump-no-links jump-malformed jump-reverse jump-open-fail; do
+  auto_reset
+  rm -rf -- "$capture_dir"
+  AUTO_CLOCK=0907 PASTE_MODE=$mode run_auto
+  expected_jumps=0; [[ $mode != jump-reverse && $mode != jump-open-fail ]] || expected_jumps=1
+  [[ $auto_code == 1 && ! -e $out/2026-09-28.paste-skipped && ! -e $out/2026-09-28.paste-attention && $(grep -c '^open slack://.*&message=' "$CALLS") == "$expected_jumps" ]] || fail "Unidentified channel or unconfirmed screen became terminal: $mode"
+  ! grep -Eq '^orca computer (scroll|click|hotkey|press-key|set-value)' "$CALLS" || fail "Unidentified/unconfirmed screen clicked or typed: $mode"
+  captures=("$capture_dir"/*.txt)
+  [[ ${#captures[@]} == 1 && -f ${captures[0]} ]] || fail "Unidentified/unconfirmed screen lacks diagnostic: $mode"
+  case $mode in
+    jump-reverse|jump-no-links) grep -Fq 'progress=0' "${captures[0]}" || fail 'Missing or decreasing maximum was not reported' ;;
+    jump-open-fail) grep -Fq 'command_exit=89' "${captures[0]}" || fail 'Failed message open lacks exit code' ;;
+    jump-malformed) grep -Fq '채널/메시지 목록' "${captures[0]}" || fail 'Malformed original URL did not trigger message-list diagnostic' ;;
+    *) grep -Fq 'channel jump 0: configured_channel=false' "${captures[0]}" || fail 'Wrong-channel diagnostic lacks configured-channel check' ;;
+  esac
+  ! grep -Eq 'jump-secret|비밀본문|daily-scrum|other-channel|CEXAMPLE|COTHER|example.slack.com' "${captures[0]}" || fail "Channel diagnostic leaked content: $mode"
 done
 auto_reset
-AUTO_CLOCK=0907 AUTO_SELF_RESET=1 AUTO_INPUT_AT=4 PASTE_MODE=scroll-delayed run_auto
-[[ $auto_code == 4 && $(grep -c '^orca computer scroll ' "$CALLS") == 1 && ! -e $out/2026-09-28.paste-skipped && ! -e $out/2026-09-28.pasted && $(cat "$out/2026-09-28.paste-attempts") == 0 ]] || fail 'User input during scrolling did not defer before the next scroll'
-jq -Rse 'split("\n") as $calls | ($calls|index("input-at 4")) as $input | $input!=null and all($calls[$input+1:][];test("^open |^orca computer (scroll|click|hotkey|set-value|press-key)")|not)' "$CALLS" >/dev/null || fail 'GUI mutation ran after scroll input guard'
-[[ $(cat "$CLIPBOARD") == 'original clipboard' && $(cat "$FOREGROUND") == com.tinyspeck.slackmacgap ]] || fail 'Scroll interruption stole focus or clipboard'
+AUTO_CLOCK=0907 PASTE_MODE=jump-empty-ready run_auto
+[[ $auto_code == 0 && -f $out/2026-09-28.pasted && $(grep -c '^open slack://.*&message=' "$CALLS") == 1 ]] || fail 'First empty rendering did not recover after one extra read without a forward jump'
+jq -Rse 'split("\n") as $calls | ($calls|index("open slack://channel?team=TEXAMPLE&id=CEXAMPLE")) as $open |
+  $open!=null and $calls[$open+1]=="channel-wait 3" and ($calls[$open+2]|startswith("orca computer get-app-state ")) and
+  $calls[$open+3]=="channel-wait 3" and ($calls[$open+4]|startswith("orca computer get-app-state "))' "$CALLS" >/dev/null ||
+  fail 'Initial empty originals did not wait once before retrying'
 auto_reset
-AUTO_CLOCK=0907 run_auto
-[[ $auto_code == 0 && -f $out/2026-09-28.pasted && $(grep -c '^orca computer scroll ' "$CALLS") == 0 ]] || fail 'Already visible today post was scrolled'
-auto_reset
-AUTO_CLOCK=0907 PASTE_MODE=shared-permalink run_auto
-[[ $auto_code == 0 && -f $out/2026-09-28.pasted && $(grep -c '^orca computer scroll ' "$CALLS") == 0 ]] || fail 'Shared foreign permalink prevented valid today-channel navigation'
-grep -q 'click .*--element-index 61 ' "$CALLS" || fail 'Shared foreign permalink changed the today reply target'
-! grep -q 'click .*--element-index 93 ' "$CALLS" || fail 'Shared foreign permalink was clicked'
-# A forwarded attachment can render another channel's link with a timestamp-style label.
-auto_reset
-AUTO_CLOCK=0907 PASTE_MODE=forwarded-timestamp run_auto
-[[ $auto_code == 0 && -f $out/2026-09-28.pasted && $(grep -c '^orca computer scroll ' "$CALLS") == 0 ]] || fail 'Forwarded timestamp link from another channel blocked valid navigation'
-! grep -q 'click .*--element-index 93 ' "$CALLS" || fail 'Forwarded foreign timestamp link was clicked'
+AUTO_CLOCK=0907 AUTO_SELF_RESET=1 AUTO_INPUT_AT=4 PASTE_MODE=jump-delayed run_auto
+[[ $auto_code == 4 && $(grep -c '^open slack://.*&message=' "$CALLS") == 1 && ! -e $out/2026-09-28.paste-skipped && ! -e $out/2026-09-28.pasted && $(cat "$out/2026-09-28.paste-attempts") == 0 ]] || fail 'User input during jumping did not defer before the next jump'
+jq -Rse 'split("\n") as $calls | ($calls|index("input-at 4")) as $input | $input!=null and all($calls[$input+1:][];test("^open |^orca computer (scroll|click|hotkey|set-value|press-key)")|not)' "$CALLS" >/dev/null || fail 'GUI mutation ran after jump input guard'
+[[ $(cat "$CLIPBOARD") == 'original clipboard' && $(cat "$FOREGROUND") == com.tinyspeck.slackmacgap ]] || fail 'Jump interruption stole focus or clipboard'
+for mode in normal shared-permalink forwarded-timestamp; do
+  auto_reset
+  AUTO_CLOCK=0907 PASTE_MODE=$mode run_auto
+  [[ $auto_code == 0 && -f $out/2026-09-28.pasted && $(grep -c '^open slack://.*&message=' "$CALLS") == 1 ]] || fail "Visible today post needed a forward jump or foreign attachment blocked navigation: $mode"
+  ! grep -q '^orca computer scroll ' "$CALLS" || fail 'Visible today post called scroll'
+  grep -q 'click .*--element-index 61 ' "$CALLS" || fail 'Foreign attachment changed the today reply target'
+  ! grep -q 'click .*--element-index 93 ' "$CALLS" || fail 'Forwarded foreign timestamp link was clicked'
+done
+printf '회귀: 실제 10/14 렌더/고정 화면, 10/12 두 번 점프, 오늘 게시 범위+연속 2회 정지+추가 대기 종결, 과거 정지·앞/자식 자리표시 재시도, 혼합 URL 오류, 배너 헤더, 최초 빈 렌더 재판독, 검색 루트 직접 점프, 입력 중단 — PASS\n'
 for mode in duplicate nonempty; do
   auto_reset
   PASTE_MODE=$mode run_auto

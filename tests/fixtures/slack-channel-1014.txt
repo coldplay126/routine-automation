@@ -1,0 +1,150 @@
+179 내용 목록 daily-scrum (채널)
+	180 container ⟨42자⟩
+		181 팝업 버튼 ⟨6자⟩
+	182 container ⟨205자⟩
+		183 container
+			184 버튼 ⟨15자⟩
+			185 텍스트, Value: ⟨4자⟩
+			186 텍스트
+			187 link [10월 12일, 오전 8:00:08](https://example.slack.com/archives/CEXAMPLE/p1791759608663559)
+			188 container, Text: ⟨66자⟩
+			189 텍스트, Value: ⟨2자⟩
+			190 버튼 7개의 댓글
+			191 container, Text: ⟨18자⟩
+	192 container ⟨56자⟩
+		193 container
+			194 버튼 ⟨11자⟩
+			195 텍스트
+			196 link [10월 12일, 오전 10:25:37](https://example.slack.com/archives/CEXAMPLE/p1791768337739179)
+			197 텍스트, Value: ⟨10자⟩
+			198 텍스트, Value: ⟨14자⟩
+			199 텍스트, Value: ⟨10자⟩
+	200 container ⟨33자⟩
+		201 팝업 버튼 ⟨6자⟩
+	202 container ⟨205자⟩
+		203 container
+			204 버튼 ⟨15자⟩
+			205 텍스트, Value: ⟨4자⟩
+			206 텍스트
+			207 link [어제, 오전 8:00:07](https://example.slack.com/archives/CEXAMPLE/p1791846007514619)
+			208 container, Text: ⟨66자⟩
+			209 텍스트, Value: ⟨2자⟩
+			210 버튼 9개의 댓글
+			211 container, Text: ⟨20자⟩
+	212 container ⟨182자⟩
+		213 container
+			214 버튼 ⟨9자⟩
+			215 텍스트, Value: ⟨4자⟩
+			216 텍스트
+			217 link [어제, 오전 8:00:08](https://example.slack.com/archives/CEXAMPLE/p1791846008280159)
+			218 container, Text: ⟨98자⟩
+			219 텍스트, Value: ⟨2자⟩
+			220 버튼 9개의 댓글
+			221 container, Text: ⟨20자⟩
+	222 container 스크럼-예제팀: 예제팀: ⟨176자⟩
+		223 container
+			224 버튼 ⟨9자⟩
+			225 텍스트, Value: ⟨4자⟩
+			226 텍스트
+			227 link [어제, 오전 8:00:08](https://example.slack.com/archives/CEXAMPLE/p1791846008689959)
+			228 container, Text: ⟨101자⟩
+			229 텍스트, Value: ⟨2자⟩
+			230 버튼 14개의 댓글
+			231 container, Text: ⟨20자⟩
+			232 container 메시지 작업
+				233 버튼 반응 추가...
+				234 버튼 스레드에 댓글 달기
+				235 버튼 메시지 전달...
+				236 전환 버튼 나중을 위해 저장, Value: 0
+				237 버튼 스레드 요약
+				238 팝업 버튼 추가 작업
+	239 container ⟨185자⟩
+		240 container
+			241 버튼 ⟨8자⟩
+			242 텍스트, Value: ⟨4자⟩
+			243 텍스트
+			244 link [어제, 오전 8:00:09](https://example.slack.com/archives/CEXAMPLE/p1791846009585869)
+			245 container, Text: ⟨102자⟩
+			246 버튼 5개의 댓글
+			247 container, Text: ⟨20자⟩
+			248 container 메시지 작업
+				249 버튼 반응 추가...
+				250 버튼 스레드에 댓글 달기
+				251 버튼 메시지 전달...
+				252 전환 버튼 나중을 위해 저장, Value: 0
+				253 버튼 스레드 요약
+				254 팝업 버튼 추가 작업
+	255 container ⟨213자⟩
+		256 container
+			257 버튼 ⟨15자⟩
+			258 텍스트, Value: ⟨4자⟩
+			259 텍스트
+			260 link [어제, 오전 8:00:11](https://example.slack.com/archives/CEXAMPLE/p1791846011287819)
+			261 container, Text: ⟨71자⟩
+			262 텍스트, Value: ⟨2자⟩
+			263 버튼 7개의 댓글
+			264 container, Text: ⟨20자⟩
+			265 container 메시지 작업
+				266 버튼 반응 추가...
+				267 버튼 스레드에 댓글 달기
+				268 버튼 메시지 전달...
+				269 전환 버튼 나중을 위해 저장, Value: 0
+				270 버튼 스레드 요약
+				271 팝업 버튼 추가 작업
+	272 container ⟨182자⟩
+		273 container
+			274 버튼 ⟨8자⟩
+			275 텍스트, Value: ⟨4자⟩
+			276 텍스트
+			277 link [어제, 오전 8:00:13](https://example.slack.com/archives/CEXAMPLE/p1791846013260479)
+			278 container, Text: ⟨99자⟩
+			279 텍스트, Value: ⟨2자⟩
+			280 버튼 8개의 댓글
+			281 container, Text: ⟨20자⟩
+			282 container 메시지 작업
+				283 버튼 반응 추가...
+				284 버튼 스레드에 댓글 달기
+				285 버튼 메시지 전달...
+				286 전환 버튼 나중을 위해 저장, Value: 0
+				287 버튼 스레드 요약
+				288 팝업 버튼 추가 작업
+	289 container ⟨188자⟩
+		290 container
+			291 버튼 ⟨11자⟩
+			292 텍스트, Value: ⟨4자⟩
+			293 텍스트
+			294 link [어제, 오전 8:00:13](https://example.slack.com/archives/CEXAMPLE/p1791846013379369)
+			295 container, Text: ⟨102자⟩
+			296 텍스트, Value: ⟨2자⟩
+			297 버튼 6개의 댓글
+			298 container, Text: ⟨20자⟩
+			299 container 메시지 작업
+				300 버튼 반응 추가...
+				301 버튼 스레드에 댓글 달기
+				302 버튼 메시지 전달...
+				303 전환 버튼 나중을 위해 저장, Value: 0
+				304 버튼 스레드 요약
+				305 팝업 버튼 추가 작업
+	306 container ⟨33자⟩
+		307 팝업 버튼 ⟨6자⟩
+	308 container ⟨174자⟩
+		309 container
+			310 버튼 ⟨8자⟩
+			311 텍스트, Value: ⟨4자⟩
+			312 텍스트
+			313 link [오늘, 오전 8:00:06](https://example.slack.com/archives/CEXAMPLE/p1791932406774479)
+			314 container, Text: ⟨99자⟩
+	315 container ⟨205자⟩
+		316 container
+			317 버튼 ⟨15자⟩
+			318 텍스트, Value: ⟨4자⟩
+			319 텍스트
+			320 link [오늘, 오전 8:00:06](https://example.slack.com/archives/CEXAMPLE/p1791932406846179)
+			321 container, Text: ⟨71자⟩
+	322 container ⟨177자⟩
+		323 container
+			324 버튼 ⟨8자⟩
+			325 텍스트, Value: ⟨4자⟩
+			326 텍스트
+			327 link [오늘, 오전 8:00:06](https://example.slack.com/archives/CEXAMPLE/p1791932406995949)
+			328 container, Text: ⟨102자⟩

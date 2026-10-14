@@ -174,26 +174,64 @@ def channel_scrum_blocks: main_list_lines |
   if length==0 then error("채널 본문 목록을 확인하지 못했습니다") else map(.raw)|join("\n")|scrum_blocks end;
 def channel_scrum_block: channel_scrum_blocks |
   if length==1 then .[0] else error("채널 본문에서 오늘 스크럼 글을 하나로 식별하지 못했습니다") end;
+# Direct children of the channel list are messages (or date/loading containers).
+# A message's own time is the first timestamp among its header container's direct children;
+# deeper forwarded/unfurled timestamps are never channel identity or navigation markers.
+def channel_messages:
+  main_list_lines as $lines |
+  if ($lines|length)<2 then [] else
+    ($lines[1:]|map(.indent)|min) as $depth |
+    [range(1;$lines|length) as $start |
+      select($lines[$start].indent==$depth and ($lines[$start].body|test("^container(?:[, ]|$)"))) |
+      ([$lines[$start+1:]|to_entries[]|select(.value.indent<=$depth)|.key+$start+1][0] // ($lines|length)) as $end |
+      {start:$start,lines:$lines[$start:$end]}] end;
+def channel_original_timestamps:
+  [channel_messages[] | . as $message | .lines as $lines |
+    ($lines[1:]|map(.indent)|min) as $header_depth |
+    ([range(1;$lines|length) as $header |
+      select($lines[$header].indent==$header_depth and ($lines[$header].body|test("^container(?:[, ]|$)"))) |
+      ([$lines[$header+1:]|to_entries[]|select(.value.indent<=$header_depth)|.key+$header+1][0] // ($lines|length)) as $end |
+      $lines[$header+1:$end] as $children |
+      ($children|map(.indent)|min) as $time_depth |
+      [$children[]|select(.indent==$time_depth and (.body|timestamp_link))][0] |
+      select(.!=null)][0]) as $time |
+    select($time!=null) | $time+{message_start:$message.start}];
 # The init fallback can propose an unknown channel, but navigation must verify it first.
 def channel_list_identified:
   main_list_lines as $lines |
-  [$lines[].body|select(timestamp_link)] as $timestamps |
-  # Forwarded/shared attachments may carry another channel's timestamp link; the configured
-  # channel must own strictly more timestamp links than all other channels combined.
+  channel_original_timestamps as $timestamps |
   if ($timestamps|length)>0 then
     ($ARGS.named.routine.slack.channel_id // "") as $channel |
-    [$timestamps[]|[capture("/archives/(?<id>[CG][A-Z0-9]+)/").id][0]==$channel] as $own |
-    $channel!="" and ([$own[]|select(.)]|length) > ([$own[]|select(.|not)]|length)
+    $channel!="" and all($timestamps[];
+      ([.body|capture("/archives/(?<id>[CG][A-Z0-9]+)/").id][0] // "")==$channel)
   else ($lines|length)>0 and (slack_settings.channel_name|length)>0 and
     ($lines[0].body|capture("^내용 목록 (?<name>.+?)[[:space:]]+\\((?:비공개[[:space:]]+)?채널").name|
       sub("^\\*[[:space:]]*";"")|ltrimstr("#"))==slack_settings.channel_name end;
-# Scroll only the selected channel list; the last exact timestamp link is the progress marker.
-def channel_scroll_position:
-  main_list_lines as $lines |
-  if (channel_list_identified|not) or ($lines|length)==0 or $lines[0].index==null then error("설정된 채널 스크롤 목록을 확인하지 못했습니다")
-  else {index:$lines[0].index,
-    last:([$lines[].body|select(timestamp_link)|capture("^link \\[(?<label>[^]]+)\\]\\((?<url>https?://[^)]+)\\)$")|
-      .+{time:([.url|capture("/p(?<p>[0-9]{16})(\\?[^#]*)?$").p|tonumber][0] // 0)}]|last // null)} end;
+# Jump to the greatest original permalink p, not the last rendered or forwarded link.
+# Seeing only yesterday, or today's first workflow posts, does not prove today's
+# posting interval has rendered. Require a today original after the entire configured
+# minute prefix (e.g. "오전 8:0" ends at 08:09:59).
+def channel_today_covered($last):
+  def hour: (.hour|tonumber)%12 + (if .period=="오후" then 12 else 0 end);
+  ([slack_settings.post_time_prefix // "오전 8:0" |
+    capture("^(?<period>오전|오후) (?<hour>[0-9]{1,2}):(?<minute>[0-9]{1,2})$")][0]) as $post |
+  ([$last.label // "" |
+    capture("^오늘, (?<period>오전|오후) (?<hour>[0-9]{1,2}):(?<minute>[0-9]{2})(?::(?<second>[0-9]{2}))?$")][0]) as $visible |
+  if $post==null or $visible==null then false else
+    (($visible|hour)*3600 + ($visible.minute|tonumber)*60 + ($visible.second // "0"|tonumber)) >
+    (($post|hour)*3600 + ($post.minute|if length==1 then .+"9" else . end|tonumber)*60 + 59) end;
+def channel_message_position:
+  if (channel_list_identified|not) then error("설정된 채널 메시지 목록을 확인하지 못했습니다")
+  else channel_original_timestamps as $timestamps |
+    ([$timestamps[] | . as $line |
+    .body|capture("^link \\[(?<label>[^]]+)\\]\\((?<url>https?://[^)]+)\\)$") |
+    ([.url|capture("/p(?<p>[0-9]{16})(?:\\?[^#]*)?$").p][0] // error("원글 메시지 시각을 해석하지 못했습니다")) as $p |
+    .+{p:$p,ts:($p[0:10]+"."+$p[10:16]),message_start:$line.message_start}] | max_by(.p) // null) as $last |
+    {last:$last,today_covered:channel_today_covered($last),
+      # A rendered message may discuss loading; only messages without an original
+      # header timestamp can be loading placeholders.
+      loading_present:any(channel_messages[]; .start as $start |
+        all($timestamps[]; .message_start!=$start) and any(.lines[]; .body|contains("로드 중")))} end;
 def thread_lines:
   ax_lines as $lines | [range(0;$lines|length)|select(slack_settings.channel_name|length>0)|select($lines[.].body|contains(slack_settings.channel_name+slack_labels.thread_panel))] as $starts |
   if ($starts|length)!=1 then error("스크럼 스레드 패널을 확인하지 못했습니다") else $lines[$starts[0]:] end;
